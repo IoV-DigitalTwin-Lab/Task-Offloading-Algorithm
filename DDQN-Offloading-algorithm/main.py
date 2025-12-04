@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import random
+from torch.utils.tensorboard import SummaryWriter # TENSORBOARD
 
 from src.environment import IoVDummyEnv
 from src.agent import DDQNAgent
@@ -11,7 +12,9 @@ from src.config import Config
 def run():
     os.makedirs(os.path.dirname(Config.MODEL_SAVE_PATH), exist_ok=True)
     os.makedirs(os.path.dirname(Config.PLOT_SAVE_PATH), exist_ok=True)
+    os.makedirs(Config.LOG_DIR, exist_ok=True)
 
+    writer = SummaryWriter(log_dir=Config.LOG_DIR)
     env = IoVDummyEnv()
     ddqn_agent = DDQNAgent()
     greedy_agent = GreedyAgent()
@@ -25,12 +28,11 @@ def run():
         "greedy_latency": []
     }
     
-    print(f"Starting Comparison: DDQN vs Greedy on {Config.DEVICE}...")
+    print(f"Starting Training on {Config.DEVICE}...")
     episodes = 500
     
     for episode in range(episodes):
         # --- A. RUN DDQN ---
-        # Reset Env with specific seed so both agents see the SAME scenario
         seed = Config.SEED + episode
         random.seed(seed)
         np.random.seed(seed)
@@ -41,14 +43,14 @@ def run():
         
         # Train DDQN
         ddqn_agent.store_transition(state, action, reward, next_state, done)
-        ddqn_agent.train()
+        loss = ddqn_agent.train()
         
         history["ddqn_rewards"].append(reward)
         history["ddqn_success"].append(info['success'])
         history["ddqn_latency"].append(info['latency'])
         
-        if episode % 10 == 0:
-            ddqn_agent.update_target_network()
+        # Soft Update
+        ddqn_agent.update_target_network_soft()
 
         # --- B. RUN GREEDY (Baseline) ---
         # Reset Env with SAME seed to ensure fair comparison
@@ -59,16 +61,29 @@ def run():
         greedy_action = greedy_agent.select_action(env.candidates, env.rsu)
         _, g_reward, _, g_info = env.step(greedy_action)
         
+        # --- LOGGING ---
         history["greedy_rewards"].append(g_reward)
         history["greedy_success"].append(g_info['success'])
         history["greedy_latency"].append(g_info['latency'])
+
+        writer.add_scalar("Reward/DDQN", reward, episode)
+        writer.add_scalar("Reward/Greedy", g_reward, episode)
+        writer.add_scalar("Success_Rate/DDQN", info['success'], episode)
+        writer.add_scalar("Success_Rate/Greedy", g_info['success'], episode)
+        writer.add_scalar("Latency/DDQN", info['latency'], episode)
+        writer.add_scalar("Latency/Greedy", g_info['latency'], episode)
+        writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
+        if loss is not None:
+            writer.add_scalar("Loss", loss, episode)
         
         if episode % 20 == 0:
             avg_ddqn = np.mean(history["ddqn_rewards"][-20:])
             avg_greedy = np.mean(history["greedy_rewards"][-20:])
-            print(f"Ep {episode} | DDQN Rew: {avg_ddqn:.2f} | Greedy Rew: {avg_greedy:.2f} | Epsilon: {ddqn_agent.epsilon:.2f}")
+            print(f"Ep {episode} | DDQN Rew: {avg_ddqn:.2f} | Greedy Rew: {avg_greedy:.2f} | Loss: {loss if loss else 0:.4f} | Epsilon: {ddqn_agent.epsilon:.2f}")
 
     ddqn_agent.save_model(Config.MODEL_SAVE_PATH)
+    writer.close()
+    print(f"Training Complete. Logs saved to {Config.LOG_DIR}")
     print(f"DDQN Model saved to {Config.MODEL_SAVE_PATH}")
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 5))
