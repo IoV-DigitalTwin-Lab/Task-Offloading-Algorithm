@@ -6,9 +6,9 @@ class Config:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, "models", "ddqn_iov_model.pth")
     PLOT_SAVE_PATH = os.path.join(BASE_DIR, "output", "training_results.png")
+    LOG_DIR = os.path.join(BASE_DIR, "output", "runs")
 
     # --- Multi-RSU Settings (NEW) ---
-    # We simulate a highway 3000m long with 3 RSUs
     RSU_RANGE = 500          # Radius (Coverage is 1000m diameter)
     RSU_LOCATIONS = [        # (x, y) coordinates of RSUs
         (500, 0), 
@@ -45,6 +45,7 @@ class Config:
     REWARD_SUCCESS = 20
     REWARD_FAILURE = -20
     REWARD_HANDOVER_FAIL = -30    # Higher penalty for connection loss
+    REWARD_SCALE = 10.0
     # Weights for multi-objective reward
     W_LATENCY = 0.6
     W_ENERGY = 0.2
@@ -59,11 +60,14 @@ class Config:
 
     ACTION_DIM = MAX_NEIGHBORS + 2      # K vehicles + RSU + Drop/keep
     HIDDEN_DIM = 256
-    LR = 0.0005
+    LR = 0.0001
     GAMMA = 0.99
+    TAU = 0.005 # Polyak Averaging factor
     EPSILON_START = 1.0
     EPSILON_END = 0.05
     EPSILON_DECAY = 0.995
     BATCH_SIZE = 64
     MEMORY_SIZE = 50000
+    PER_ALPHA = 0.6  # How much prioritization to use (0=None, 1=Full)
+    PER_BETA = 0.4   # Importance Sampling correction (annealed to 1.0)
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
