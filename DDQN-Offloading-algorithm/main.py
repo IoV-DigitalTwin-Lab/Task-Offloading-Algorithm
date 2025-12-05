@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import random
-from torch.utils.tensorboard import SummaryWriter # TENSORBOARD
+from torch.utils.tensorboard import SummaryWriter
 
 from src.environment import IoVDummyEnv
 from src.agent import DDQNAgent
@@ -27,9 +27,10 @@ def run():
         "ddqn_latency": [],
         "greedy_latency": []
     }
+    best_avg_reward = -float('inf')
     
     print(f"Starting Training on {Config.DEVICE}...")
-    episodes = 500
+    episodes = Config.EPISODS
     
     for episode in range(episodes):
         # --- A. RUN DDQN ---
@@ -58,7 +59,7 @@ def run():
         np.random.seed(seed)
         _ = env.reset() # State is same as DDQN saw
         
-        greedy_action = greedy_agent.select_action(env.candidates, env.rsu)
+        greedy_action = greedy_agent.select_action(env.candidates, env.active_rsu)
         _, g_reward, _, g_info = env.step(greedy_action)
         
         # --- LOGGING ---
@@ -76,19 +77,23 @@ def run():
         if loss is not None:
             writer.add_scalar("Loss", loss, episode)
         
-        if episode % 20 == 0:
-            avg_ddqn = np.mean(history["ddqn_rewards"][-20:])
-            avg_greedy = np.mean(history["greedy_rewards"][-20:])
+        if episode % 100 == 0:
+            avg_ddqn = np.mean(history["ddqn_rewards"][-100:])
+            avg_greedy = np.mean(history["greedy_rewards"][-100:])
             print(f"Ep {episode} | DDQN Rew: {avg_ddqn:.2f} | Greedy Rew: {avg_greedy:.2f} | Loss: {loss if loss else 0:.4f} | Epsilon: {ddqn_agent.epsilon:.2f}")
 
-    ddqn_agent.save_model(Config.MODEL_SAVE_PATH)
+            if avg_ddqn > best_avg_reward and episode > 1000:
+                best_avg_reward = avg_ddqn
+                ddqn_agent.save_model(Config.MODEL_SAVE_PATH)
+                print(f"  >> New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
+
     writer.close()
     print(f"Training Complete. Logs saved to {Config.LOG_DIR}")
     print(f"DDQN Model saved to {Config.MODEL_SAVE_PATH}")
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 5))
     
-    def smooth(data, window=20):
+    def smooth(data, window=100):
         return np.convolve(data, np.ones(window)/window, mode='valid')
 
     # Plot 1: Rewards
