@@ -193,6 +193,8 @@ class IoVDummyEnv:
         else:
             reward = Config.REWARD_FAILURE * self.current_task.qos
 
+        # Normalize reward to keep gradients stable
+        reward = reward / Config.REWARD_SCALE
         info = {
             "latency": latency,
             "energy": energy,

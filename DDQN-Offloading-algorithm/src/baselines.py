@@ -7,13 +7,14 @@ class GreedyAgent:
         1. Look at all Top-K candidates.
         2. Pick the one with the HIGHEST Available CPU.
         3. If RSU has more CPU than any vehicle, pick RSU.
+        Doesn't consider: Latency, Heading, Battery, or Task Deadline.
         """
         best_cpu = -1
         action = Config.ACTION_DIM - 1 # Default to Drop/Fail
         
         # 1. Check Top-K Vehicle Candidates
         for i, vehicle in enumerate(candidates):
-            if vehicle.cpu_avail > best_cpu:
+            if vehicle.battery_avail > 0 and vehicle.cpu_avail > best_cpu:
                 best_cpu = vehicle.cpu_avail
                 action = i
                 
