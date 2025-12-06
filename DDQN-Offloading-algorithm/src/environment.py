@@ -20,18 +20,21 @@ class IoVDummyEnv:
             for i in range(Config.NUM_VEHICLES)
         ]
         
-        # 3. Spread vehicles
-        for v in self.vehicles:
-            v.pos_x = random.uniform(0, Config.MAP_WIDTH)
-            v.pos_y = random.uniform(-Config.RSU_RANGE, Config.RSU_RANGE) # Highway width
-            v.speed = random.uniform(5, Config.MAX_SPEED) # Moving traffic
-            v.heading = random.choice([0, 180]) + random.uniform(-10, 10) # East or West flow
-            v.acceleration = 0
+        self._respawn_vehicles() # Initial Spawn
 
         self.active_rsu = None # The RSU handling the current step
         self.current_task = None
         self.task_origin_vehicle = None
         self.candidates = []
+
+    def _respawn_vehicles(self):
+        """Helper to randomize vehicle positions across the map."""
+        for v in self.vehicles:
+            v.pos_x = random.uniform(0, Config.MAP_WIDTH)
+            v.pos_y = random.uniform(-Config.RSU_RANGE, Config.RSU_RANGE)
+            v.speed = random.uniform(5, Config.MAX_SPEED)
+            v.heading = random.choice([0, 180]) + random.uniform(-10, 10)
+            v.acceleration = 0
 
     def _get_closest_rsu(self, vehicle):
         """Finds the RSU with minimum distance to the vehicle."""
@@ -50,19 +53,33 @@ class IoVDummyEnv:
         return None
 
     def reset(self):
-        # 1. Randomly pick a vehicle that is CURRENTLY connected to an RSU
-        valid_vehicles = []
-        for v in self.vehicles:
-            rsu = self._get_closest_rsu(v)
-            if rsu:
-                v.connected_rsu_id = rsu.rsu_id
-                valid_vehicles.append((v, rsu))
+        # --- ROBUST RESET LOGIC ---
+        # Instead of recursion, we loop until we find a valid scenario.
+        attempts = 0
         
-        if not valid_vehicles:
-            # Edge case: No vehicles in range (simulate ticks until one enters)
+        while True:
+            valid_vehicles = []
+            for v in self.vehicles:
+                rsu = self._get_closest_rsu(v)
+                if rsu:
+                    v.connected_rsu_id = rsu.rsu_id
+                    valid_vehicles.append((v, rsu))
+            
+            # If we found vehicles, break the loop
+            if valid_vehicles:
+                break
+            
+            # If no vehicles are in range, advance physics and try again
             self._update_physics_global()
-            return self.reset()
+            attempts += 1
+            
+            # FAILSAFE: If simulation runs empty for 1000 steps, respawn everyone.
+            # This prevents infinite loops or recursion errors.
+            if attempts > 1000:
+                self._respawn_vehicles()
+                attempts = 0
 
+        # Select a random valid vehicle and its RSU
         self.task_origin_vehicle, self.active_rsu = random.choice(valid_vehicles)
         
         # 2. Generate Task
