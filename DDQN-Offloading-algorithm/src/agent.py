@@ -91,13 +91,25 @@ class DDQNAgent:
         self.beta = Config.PER_BETA
         self.criterion = nn.SmoothL1Loss(reduction='none') # 'none' to handle weights manually
 
-    def select_action(self, state, eval_mode=False):
+    def select_action(self, state, mask=None, eval_mode=False):
+        """
+        Selects action using Epsilon-Greedy with Action Masking.
+        """
         if not eval_mode and random.random() < self.epsilon:
+            if mask is not None:
+                valid_indices = np.where(mask == 1)[0]
+                return np.random.choice(valid_indices)
             return random.randint(0, Config.ACTION_DIM - 1)
         
         with torch.no_grad():
             state_t = torch.FloatTensor(state).unsqueeze(0).to(Config.DEVICE)
             q_values = self.policy_net(state_t)
+            
+            # --- ACTION MASKING ---
+            if mask is not None:
+                mask_t = torch.FloatTensor(mask).unsqueeze(0).to(Config.DEVICE)
+                q_values = q_values.masked_fill(mask_t == 0, -1e9)
+            
             return q_values.argmax().item()
 
     def store_transition(self, state, action, reward, next_state, done):

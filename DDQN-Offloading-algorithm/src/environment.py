@@ -20,18 +20,21 @@ class IoVDummyEnv:
             for i in range(Config.NUM_VEHICLES)
         ]
         
-        # 3. Spread vehicles
-        for v in self.vehicles:
-            v.pos_x = random.uniform(0, Config.MAP_WIDTH)
-            v.pos_y = random.uniform(-Config.RSU_RANGE, Config.RSU_RANGE) # Highway width
-            v.speed = random.uniform(5, Config.MAX_SPEED) # Moving traffic
-            v.heading = random.choice([0, 180]) + random.uniform(-10, 10) # East or West flow
-            v.acceleration = 0
+        self._respawn_vehicles() # Initial Spawn
 
         self.active_rsu = None # The RSU handling the current step
         self.current_task = None
         self.task_origin_vehicle = None
         self.candidates = []
+
+    def _respawn_vehicles(self):
+        """Helper to randomize vehicle positions across the map."""
+        for v in self.vehicles:
+            v.pos_x = random.uniform(0, Config.MAP_WIDTH)
+            v.pos_y = random.uniform(-Config.RSU_RANGE, Config.RSU_RANGE)
+            v.speed = random.uniform(5, Config.MAX_SPEED)
+            v.heading = random.choice([0, 180]) + random.uniform(-10, 10)
+            v.acceleration = 0
 
     def _get_closest_rsu(self, vehicle):
         """Finds the RSU with minimum distance to the vehicle."""
@@ -50,19 +53,33 @@ class IoVDummyEnv:
         return None
 
     def reset(self):
-        # 1. Randomly pick a vehicle that is CURRENTLY connected to an RSU
-        valid_vehicles = []
-        for v in self.vehicles:
-            rsu = self._get_closest_rsu(v)
-            if rsu:
-                v.connected_rsu_id = rsu.rsu_id
-                valid_vehicles.append((v, rsu))
+        # --- ROBUST RESET LOGIC ---
+        # Instead of recursion, we loop until we find a valid scenario.
+        attempts = 0
         
-        if not valid_vehicles:
-            # Edge case: No vehicles in range (simulate ticks until one enters)
+        while True:
+            valid_vehicles = []
+            for v in self.vehicles:
+                rsu = self._get_closest_rsu(v)
+                if rsu:
+                    v.connected_rsu_id = rsu.rsu_id
+                    valid_vehicles.append((v, rsu))
+            
+            # If we found vehicles, break the loop
+            if valid_vehicles:
+                break
+            
+            # If no vehicles are in range, advance physics and try again
             self._update_physics_global()
-            return self.reset()
+            attempts += 1
+            
+            # FAILSAFE: If simulation runs empty for 1000 steps, respawn everyone.
+            # This prevents infinite loops or recursion errors.
+            if attempts > 1000:
+                self._respawn_vehicles()
+                attempts = 0
 
+        # Select a random valid vehicle and its RSU
         self.task_origin_vehicle, self.active_rsu = random.choice(valid_vehicles)
         
         # 2. Generate Task
@@ -130,6 +147,27 @@ class IoVDummyEnv:
             
         return np.array(state, dtype=np.float32)
 
+    def get_action_mask(self):
+        """
+        Returns a binary mask [1, 0, 1, ...] of size ACTION_DIM.
+        1 = Valid Action, 0 = Invalid Action.
+        """
+        mask = np.zeros(Config.ACTION_DIM, dtype=np.float32)
+        
+        # 1. Vehicle Candidates (Neighbors)
+        for i, v in enumerate(self.candidates):
+            if v.battery_avail > 5.0 and v.memory_avail > self.current_task.size:
+                mask[i] = 1.0
+        
+        # 2. RSU (Infrastructure)
+        mask[Config.MAX_NEIGHBORS] = 1.0
+        
+        # 3. Local Execution
+        if self.task_origin_vehicle.battery_avail > 2.0:
+            mask[Config.MAX_NEIGHBORS + 1] = 1.0
+        
+        return mask
+
     def step(self, action):
         done = True
         
@@ -151,10 +189,15 @@ class IoVDummyEnv:
         latency = 0.0
         energy = 0.0
         
+        # --- CASE 1: Offload to Neighbor ---
         if action < len(self.candidates):
             target = self.candidates[action]
             
-            # Additional Handover Check: Did the SERVICE vehicle leave?
+            # Constraints Check (Redundant if masked, but good for safety)
+            if target.battery_avail < 5.0 or target.memory_avail < self.current_task.size:
+                 return self._get_state(), Config.REWARD_FAILURE * self.current_task.qos, True, \
+                        {"latency": 10.0, "success": 0, "reason": "Constraint_Fail"}
+
             s_dist = math.sqrt((target.pos_x - self.active_rsu.pos_x)**2 + (target.pos_y - self.active_rsu.pos_y)**2)
             if s_dist > Config.RSU_RANGE:
                  return self._get_state(), Config.REWARD_HANDOVER_FAIL * self.current_task.qos, True, \
@@ -171,17 +214,30 @@ class IoVDummyEnv:
             processing_time = self.current_task.cpu_req / max(1, target.cpu_avail)
             
             latency = transmission_time + processing_time + jitter
-            energy = self.current_task.cpu_req * 0.002
+            energy = self.current_task.cpu_req * 0.002 # Remote energy cost (Transmission)
             target.battery_avail -= Config.BATTERY_DRAIN_RATE
 
+        # --- CASE 2: Offload to RSU ---
         elif action == Config.MAX_NEIGHBORS:
             # RSU
             processing_time = self.current_task.cpu_req / max(1, self.active_rsu.cpu_avail)
             transmission_time = (self.current_task.size * 8) / (bandwidth * 1.5)
             latency = transmission_time + processing_time + jitter
-            energy = self.current_task.cpu_req * 0.001
+            energy = self.current_task.cpu_req * 0.001 # RSU transmission is cheaper
         
+        # --- CASE 3: Local Execution ---
+        elif action == Config.MAX_NEIGHBORS + 1:
+            # No Transmission time, ONLY Processing time
+            # But Local CPU is usually weaker than RSU
+            processing_time = self.current_task.cpu_req / max(1, self.task_origin_vehicle.cpu_avail)
+            
+            latency = processing_time # + 0 transmission
+            
+            # Local Energy is HIGH because we use our own CPU
+            energy = self.current_task.cpu_req * 0.005 
+            self.task_origin_vehicle.battery_avail -= (Config.BATTERY_DRAIN_RATE * 2) # Drains battery faster
         else:
+            # Invalid Action Fallback
             return self._get_state(), Config.REWARD_FAILURE, True, {"latency": 10.0, "success": 0}
 
         deadline_met = latency <= self.current_task.deadline

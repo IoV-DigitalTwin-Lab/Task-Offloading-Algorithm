@@ -24,27 +24,27 @@ class Config:
     DT = 0.5                 # Physics time step (0.5s)
 
     # --- Task Physics ---
-    TASK_SIZE_RANGE = (1, 8)      # MB
-    CPU_CYCLES_RANGE = (100, 1200) # Megacycles
-    DEADLINE_RANGE = (0.5, 4.0)   # Seconds
+    TASK_SIZE_RANGE = (1, 6)      # MB
+    CPU_CYCLES_RANGE = (100, 1000) # Megacycles
+    DEADLINE_RANGE = (1.0, 5.0)   # Seconds
     QOS_RANGE = (1, 3)            # 1=Standard, 2=High, 3=Critical
 
     # --- Network Physics ---
     BANDWIDTH_BASE = 20.0         # Mbps
-    BANDWIDTH_VAR = 8.0           
-    JITTER_STD = 0.1              # Network noise
+    BANDWIDTH_VAR = 5.0           
+    JITTER_STD = 0.05              # Network noise
 
     # --- Vehicle Constraints ---
-    MAX_SPEED = 30.0              # m/s (~108 km/h)
-    MAX_ACCEL = 2.0               # m/s^2
+    MAX_SPEED = 25.0              # m/s (~108 km/h)
+    MAX_ACCEL = 1.5               # m/s^2
     MAX_BATTERY = 100.0           # Percentage
     MAX_MEMORY = 4096             # MB
-    BATTERY_DRAIN_RATE = 1.5      # % per task executed
+    BATTERY_DRAIN_RATE = 0.2      # % per task executed
     
     # --- Rewards ---
-    REWARD_SUCCESS = 20
-    REWARD_FAILURE = -20
-    REWARD_HANDOVER_FAIL = -30    # Higher penalty for connection loss
+    REWARD_SUCCESS = 15
+    REWARD_FAILURE = -15
+    REWARD_HANDOVER_FAIL = -20    # Higher penalty for connection loss
     REWARD_SCALE = 10.0
     # Weights for multi-objective reward
     W_LATENCY = 0.6
@@ -60,14 +60,14 @@ class Config:
 
     ACTION_DIM = MAX_NEIGHBORS + 2      # K vehicles + RSU + Drop/keep
     HIDDEN_DIM = 256
-    EPISODS = 20000
+    EPISODS = 10000
     LR = 0.0001
     GAMMA = 0.99
     TAU = 0.005 # Polyak Averaging factor
     EPSILON_START = 1.0
-    EPSILON_END = 0.01
-    EPSILON_DECAY = 0.9995
-    BATCH_SIZE = 128
+    EPSILON_END = 0.02
+    EPSILON_DECAY = 0.9997
+    BATCH_SIZE = 256
     MEMORY_SIZE = 100000
     PER_ALPHA = 0.6  # How much prioritization to use (0=None, 1=Full)
     PER_BETA = 0.4   # Importance Sampling correction (annealed to 1.0)

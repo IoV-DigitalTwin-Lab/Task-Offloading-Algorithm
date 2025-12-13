@@ -1,26 +1,69 @@
+import numpy as np
+import random
+import math
 from src.config import Config
 
-class GreedyAgent:
-    def select_action(self, candidates, rsu):
-        """
-        Greedy Strategy:
-        1. Look at all Top-K candidates.
-        2. Pick the one with the HIGHEST Available CPU.
-        3. If RSU has more CPU than any vehicle, pick RSU.
-        Doesn't consider: Latency, Heading, Battery, or Task Deadline.
-        """
+class RandomAgent:
+    def select_action(self, mask):
+        """Picks any valid action randomly."""
+        valid_indices = np.where(mask == 1)[0]
+        if len(valid_indices) > 0:
+            return np.random.choice(valid_indices)
+        return Config.ACTION_DIM - 1 # Drop
+
+class GreedyComputeAgent:
+    def select_action(self, candidates, rsu, mask):
+        """Picks valid action with Highest CPU."""
         best_cpu = -1
-        action = Config.ACTION_DIM - 1 # Default to Drop/Fail
+        action = Config.ACTION_DIM - 1
         
-        # 1. Check Top-K Vehicle Candidates
-        for i, vehicle in enumerate(candidates):
-            if vehicle.battery_avail > 0 and vehicle.cpu_avail > best_cpu:
-                best_cpu = vehicle.cpu_avail
-                action = i
-                
-        # 2. Check RSU (Action Index = MAX_NEIGHBORS)
-        # We multiply by 1.2 bias because RSUs usually have faster links
-        if (rsu.cpu_avail * 1.2) > best_cpu:
-            action = Config.MAX_NEIGHBORS
+        # Check Candidates
+        for i, v in enumerate(candidates):
+            if i < Config.MAX_NEIGHBORS and mask[i] == 1:
+                if v.cpu_avail > best_cpu:
+                    best_cpu = v.cpu_avail
+                    action = i
+        
+        # Check RSU
+        rsu_idx = Config.MAX_NEIGHBORS
+        if mask[rsu_idx] == 1 and (rsu.cpu_avail * 1.1) > best_cpu:
+            action = rsu_idx
             
         return action
+
+class GreedyDistanceAgent:
+    def select_action(self, candidates, rsu, mask):
+        """
+        Picks valid action that is physically CLOSEST.
+        (Minimizes Transmission Time).
+        """
+        # Distance is implicitly handled by the Environment sorting candidates by distance
+        # So Candidate[0] is always the closest vehicle.
+        
+        # 1. Try Closest Vehicle
+        for i, v in enumerate(candidates):
+            if mask[i] == 1:
+                return i
+                
+        # 2. If no vehicle valid, try RSU
+        if mask[Config.MAX_NEIGHBORS] == 1:
+            return Config.MAX_NEIGHBORS
+            
+        return Config.ACTION_DIM - 1
+    
+class LocalAgent:
+    def select_action(self, mask):
+        """
+        Always chooses Local Execution (Index = MAX_NEIGHBORS + 1).
+        If Local is invalid (dead battery), it falls back to Random.
+        """
+        local_action = Config.MAX_NEIGHBORS + 1
+        
+        if mask[local_action] == 1:
+            return local_action
+            
+        # Fallback if battery is dead
+        valid_indices = np.where(mask == 1)[0]
+        if len(valid_indices) > 0:
+            return np.random.choice(valid_indices)
+        return local_action
