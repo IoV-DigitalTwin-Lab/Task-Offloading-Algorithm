@@ -2,33 +2,46 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import random
+import argparse
 from torch.utils.tensorboard import SummaryWriter
 
-from src.environment import IoVDummyEnv
+from src.environment import IoVDummyEnv, IoVDatabaseEnv
 from src.agent import DDQNAgent
 from src.baselines import RandomAgent, GreedyComputeAgent, GreedyDistanceAgent, LocalAgent
 from src.config import Config
 
 def run():
+    parser = argparse.ArgumentParser(description="Train Task Offloading DRL Agent")
+    parser.add_argument('--env', type=str, default='dummy', choices=['dummy', 'db'], help='Environment type: dummy or db')
+    args = parser.parse_args()
+
     os.makedirs(os.path.dirname(Config.MODEL_SAVE_PATH), exist_ok=True)
     os.makedirs(os.path.dirname(Config.PLOT_SAVE_PATH), exist_ok=True)
     os.makedirs(Config.LOG_DIR, exist_ok=True)
 
     writer = SummaryWriter(log_dir=Config.LOG_DIR)
-    env = IoVDummyEnv()
+    
+    if args.env == 'db':
+        Config.load_config("db_config.json")
+        print("Initializing Database Environment...")
+        env = IoVDatabaseEnv()
+    else:
+        Config.load_config("dummy_config.json")
+        print("Initializing Dummy Environment...")
+        env = IoVDummyEnv()
     
     ddqn_agent = DDQNAgent()
     random_agent = RandomAgent()
     greedy_comp_agent = GreedyComputeAgent()
     greedy_dist_agent = GreedyDistanceAgent()
-    local_agent = LocalAgent()
+    # local_agent = LocalAgent() # Removed as per requirements
     
     metrics = {
         "ddqn": {"reward": [], "success": [], "latency": []},
         "random": {"reward": [], "success": [], "latency": []},
         "greedy_comp": {"reward": [], "success": [], "latency": []},
         "greedy_dist": {"reward": [], "success": [], "latency": []},
-        "local": {"reward": [], "success": [], "latency": []}
+        # "local": {"reward": [], "success": [], "latency": []}
     }
 
     best_avg_reward = -float('inf')
@@ -84,24 +97,24 @@ def run():
         metrics["greedy_dist"]["success"].append(gd_info['success'])
         metrics["greedy_dist"]["latency"].append(gd_info['latency'])
 
-        # --- 5. Local Execution (NEW) ---
-        random.seed(seed); np.random.seed(seed)
-        _ = env.reset(); mask = env.get_action_mask()
-        action = local_agent.select_action(mask)
-        _, loc_reward, _, loc_info = env.step(action)
-        metrics["local"]["reward"].append(loc_reward)
-        metrics["local"]["success"].append(loc_info['success'])
-        metrics["local"]["latency"].append(loc_info['latency'])
+        # --- 5. Local Execution (REMOVED) ---
+        # random.seed(seed); np.random.seed(seed)
+        # _ = env.reset(); mask = env.get_action_mask()
+        # action = local_agent.select_action(mask)
+        # _, loc_reward, _, loc_info = env.step(action)
+        # metrics["local"]["reward"].append(loc_reward)
+        # metrics["local"]["success"].append(loc_info['success'])
+        # metrics["local"]["latency"].append(loc_info['latency'])
 
         # --- LOGGING ---
         writer.add_scalars("Rewards", {
-            "DDQN": reward, "Random": r_reward, "Greedy_Comp": gc_reward, "Greedy_Dist": gd_reward, "Local": loc_reward
+            "DDQN": reward, "Random": r_reward, "Greedy_Comp": gc_reward, "Greedy_Dist": gd_reward
         }, episode)
         writer.add_scalars("Success_Rate", {
-            "DDQN": info['success'], "Random": r_info['success'], "Greedy_Comp": gc_info['success'], "Greedy_Dist": gd_info['success'], "Local": loc_info['success']
+            "DDQN": info['success'], "Random": r_info['success'], "Greedy_Comp": gc_info['success'], "Greedy_Dist": gd_info['success']
         }, episode)
         writer.add_scalars("Latency", {
-            "DDQN": info['latency'], "Random": r_info['latency'], "Greedy_Comp": gc_info['latency'], "Greedy_Dist": gd_info['latency'], "Local": loc_info['latency']
+            "DDQN": info['latency'], "Random": r_info['latency'], "Greedy_Comp": gc_info['latency'], "Greedy_Dist": gd_info['latency']
         }, episode)
         writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
         if loss is not None:
@@ -109,8 +122,8 @@ def run():
         
         if episode % 100 == 0:
             avg_ddqn = np.mean(metrics["ddqn"]["reward"][-100:])
-            avg_local = np.mean(metrics["local"]["reward"][-100:])
-            print(f"Ep {episode} | DDQN: {avg_ddqn:.2f} | Local: {avg_local:.2f} | Eps: {ddqn_agent.epsilon:.2f}")
+            # avg_local = np.mean(metrics["local"]["reward"][-100:])
+            print(f"Ep {episode} | DDQN: {avg_ddqn:.2f} | Eps: {ddqn_agent.epsilon:.2f}")
 
             if avg_ddqn > best_avg_reward and episode > 1000:
                 best_avg_reward = avg_ddqn
@@ -130,7 +143,7 @@ def run():
         ax[ax_idx].plot(smooth(metrics["ddqn"][metric_key]), label='DDQN (Ours)', color='blue', linewidth=2)
         ax[ax_idx].plot(smooth(metrics["greedy_comp"][metric_key]), label='Greedy-Comp', color='orange', linestyle='--')
         ax[ax_idx].plot(smooth(metrics["greedy_dist"][metric_key]), label='Greedy-Dist', color='green', linestyle=':')
-        ax[ax_idx].plot(smooth(metrics["local"][metric_key]), label='Local', color='red', linestyle='-.')
+        # ax[ax_idx].plot(smooth(metrics["local"][metric_key]), label='Local', color='red', linestyle='-.')
         ax[ax_idx].plot(smooth(metrics["random"][metric_key]), label='Random', color='grey', alpha=0.3)
         ax[ax_idx].set_title(title)
         ax[ax_idx].legend()

@@ -1,6 +1,10 @@
 import numpy as np
 import math
 import random
+import time
+import json
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from src.config import Config
 from src.entities import Vehicle, Task, RSU
 
@@ -258,3 +262,431 @@ class IoVDummyEnv:
         }
         
         return self._get_state(), reward, done, info
+
+class IoVDatabaseEnv:
+    def __init__(self):
+        self.conn = psycopg2.connect(
+            host=Config.DB_CONFIG["host"],
+            port=Config.DB_CONFIG["port"],
+            user=Config.DB_CONFIG["user"],
+            password=Config.DB_CONFIG["password"],
+            dbname=Config.DB_CONFIG["dbname"]
+        )
+        self.cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Initialize state variables
+        self.current_task = None
+        self.active_rsu = None
+        self.task_origin_vehicle = None
+        self.candidates = []
+        
+        # Track processed requests to avoid re-processing
+        self.last_processed_request_id = -1
+
+    def _fetch_latest_request(self):
+        """Polls the database for the next unprocessed offloading request."""
+        while True:
+            query = """
+                SELECT * FROM offloading_requests 
+                WHERE id > %s 
+                ORDER BY id ASC 
+                LIMIT 1
+            """
+            self.cursor.execute(query, (self.last_processed_request_id,))
+            row = self.cursor.fetchone()
+            
+            if row:
+                self.last_processed_request_id = row['id']
+                return row
+            
+            # Wait before polling again
+            time.sleep(Config.DB_CONFIG["poll_interval"])
+
+    def _fetch_vehicle_status(self, vehicle_id, request_time):
+        """
+        Fetches the vehicle status closest to the request time (Time Travel).
+        This ensures we train on the state AS IT WAS when the request happened.
+        """
+        # We look for the status update immediately preceding or equal to the request time
+        query = """
+            SELECT * FROM vehicle_status 
+            WHERE vehicle_id = %s AND update_time <= %s
+            ORDER BY update_time DESC 
+            LIMIT 1
+        """
+        self.cursor.execute(query, (vehicle_id, request_time))
+        row = self.cursor.fetchone()
+        
+        if row:
+            print(f"[DB] Found status for {vehicle_id} at {row['update_time']} (Req: {request_time})")
+            return row
+        else:
+            print(f"[DB-WARN] No status found for {vehicle_id} before {request_time}. Using fallback.")
+            return None
+
+    def _fetch_neighbors(self, rsu_id, origin_vehicle_id, origin_x, origin_y, request_time):
+        """
+        Fetches potential candidate vehicles connected to the same RSU.
+        Prioritizes:
+        1. Distance to Origin Vehicle (Ascending)
+        2. CPU Availability (Descending)
+        """
+        # We need to join or subquery to get the status at the right time for all vehicles
+        # This query finds the latest status <= request_time for each vehicle in the RSU
+        query = """
+            WITH RecentStatus AS (
+                SELECT DISTINCT ON (vehicle_id) *
+                FROM vehicle_status
+                WHERE rsu_id = %s 
+                  AND vehicle_id != %s
+                  AND update_time <= %s
+                ORDER BY vehicle_id, update_time DESC
+            )
+            SELECT *, 
+                   SQRT(POWER(pos_x - %s, 2) + POWER(pos_y - %s, 2)) as dist_to_origin
+            FROM RecentStatus
+            ORDER BY dist_to_origin ASC, cpu_available DESC
+            LIMIT %s
+        """
+        self.cursor.execute(query, (rsu_id, origin_vehicle_id, request_time, origin_x, origin_y, Config.MAX_NEIGHBORS))
+        return self.cursor.fetchall()
+
+    def _fetch_rsu_status(self, rsu_id, request_time):
+        """Fetches the RSU status closest to the request time."""
+        if rsu_id is None: return None
+        
+        # Try to match rsu_id (cast to string as DB uses VARCHAR)
+        query = """
+            SELECT * FROM rsu_status 
+            WHERE rsu_id = %s AND update_time <= %s
+            ORDER BY update_time DESC 
+            LIMIT 1
+        """
+        self.cursor.execute(query, (str(rsu_id), request_time))
+        return self.cursor.fetchone()
+
+    def _fetch_rsu_metadata(self, rsu_id):
+        """Fetches static metadata for the RSU."""
+        if rsu_id is None: return None
+        
+        query = "SELECT * FROM rsu_metadata WHERE rsu_id = %s"
+        self.cursor.execute(query, (str(rsu_id),))
+        return self.cursor.fetchone()
+
+    def _map_db_to_entities(self, request_row):
+        """Maps DB rows to internal Entity objects for compatibility."""
+        # 1. Create Task
+        self.current_task = Task(
+            task_id=request_row['task_id'],
+            size=request_row['task_size_bytes'] / 1024 / 1024, # Convert to MB
+            cpu_req=request_row['cpu_cycles'] / 1000000,       # Convert to Megacycles
+            vehicle_id=request_row['vehicle_id'],
+            deadline=request_row['deadline_seconds'],
+            qos=request_row['qos_value'],
+            created_time=request_row['request_time']
+        )
+        
+        # 2. Create Origin Vehicle
+        # Use the request time to fetch historical status
+        v_status = self._fetch_vehicle_status(request_row['vehicle_id'], request_row['request_time'])
+        
+        if not v_status:
+            # Fallback if status missing (shouldn't happen in sync sim)
+            # Use data from request_row itself if available (it has snapshot)
+            v_status = {
+                'vehicle_id': request_row['vehicle_id'],
+                'cpu_total': 5000, 'mem_total': 4096,
+                'pos_x': request_row.get('pos_x', 0), 
+                'pos_y': request_row.get('pos_y', 0), 
+                'speed': request_row.get('speed', 0), 
+                'heading': 0, 'acceleration': 0,
+                'cpu_available': request_row.get('vehicle_cpu_available', 5000),
+                'mem_available': request_row.get('vehicle_mem_available', 4096)
+            }
+            print(f"[DB-INFO] Using snapshot from request row for {request_row['vehicle_id']}")
+            
+        self.task_origin_vehicle = Vehicle(
+            v_id=request_row['vehicle_id'],
+            cpu_total=v_status.get('cpu_total', 5000),
+            memory_total=v_status.get('mem_total', 4096)
+        )
+        # Update dynamic props
+        self.task_origin_vehicle.pos_x = v_status.get('pos_x', 0)
+        self.task_origin_vehicle.pos_y = v_status.get('pos_y', 0)
+        self.task_origin_vehicle.speed = v_status.get('speed', 0)
+        self.task_origin_vehicle.heading = v_status.get('heading', 0)
+        self.task_origin_vehicle.cpu_avail = v_status.get('cpu_available', 0)
+        self.task_origin_vehicle.memory_avail = v_status.get('mem_available', 0)
+        
+        # 3. Create RSU
+        rsu_id = request_row['rsu_id']
+        
+        # Fetch dynamic status and static metadata
+        rsu_status = self._fetch_rsu_status(rsu_id, request_row['request_time'])
+        rsu_meta = self._fetch_rsu_metadata(rsu_id)
+        
+        # Defaults
+        cpu_total = 10000
+        mem_total = 8192
+        bandwidth = Config.BANDWIDTH_BASE
+        pos_x = 0
+        pos_y = 0
+        
+        if rsu_meta:
+            pos_x = rsu_meta.get('pos_x', 0)
+            pos_y = rsu_meta.get('pos_y', 0)
+            bandwidth = rsu_meta.get('bandwidth_mbps', Config.BANDWIDTH_BASE)
+            # If metadata has capacity, use it (assuming GHz -> *1000 for MHz approx, or just raw scale)
+            # Adjust scaling based on your simulation units. Assuming 10000 is the baseline.
+            if rsu_meta.get('cpu_capacity_ghz'): cpu_total = rsu_meta['cpu_capacity_ghz'] * 1000 
+            if rsu_meta.get('memory_capacity_gb'): mem_total = rsu_meta['memory_capacity_gb'] * 1024 
+            
+        elif rsu_id is not None and isinstance(rsu_id, int) and rsu_id < len(Config.RSU_LOCATIONS):
+             # Fallback to Config if metadata missing and ID is valid index
+             pos_x, pos_y = Config.RSU_LOCATIONS[rsu_id]
+
+        self.active_rsu = RSU(
+            rsu_id=rsu_id,
+            pos_x=pos_x,
+            pos_y=pos_y,
+            cpu_total=cpu_total,
+            memory_total=mem_total,
+            bandwidth=bandwidth
+        )
+        
+        if rsu_status:
+            self.active_rsu.cpu_avail = rsu_status.get('cpu_available', cpu_total)
+            self.active_rsu.memory_avail = rsu_status.get('memory_available', mem_total)
+            self.active_rsu.queue_length = rsu_status.get('queue_length', 0)
+        else:
+             print(f"[DB-WARN] No status found for RSU {rsu_id} at {request_row['request_time']}")
+        
+        # 4. Candidates
+        # Pass origin location and time to sort by distance
+        neighbor_rows = self._fetch_neighbors(
+            rsu_id, 
+            request_row['vehicle_id'], 
+            self.task_origin_vehicle.pos_x, 
+            self.task_origin_vehicle.pos_y,
+            request_row['request_time']
+        )
+        
+        self.candidates = []
+        for row in neighbor_rows:
+            v = Vehicle(row['vehicle_id'], row.get('cpu_total', 5000), row.get('mem_total', 4096))
+            v.pos_x = row.get('pos_x', 0)
+            v.pos_y = row.get('pos_y', 0)
+            v.speed = row.get('speed', 0)
+            v.heading = row.get('heading', 0)
+            v.cpu_avail = row.get('cpu_available', 0)
+            v.memory_avail = row.get('mem_available', 0)
+            self.candidates.append(v)
+            
+        if not self.candidates:
+            print(f"[DB-INFO] No neighbors found for task {request_row['task_id']}")
+
+    def reset(self):
+        """
+        Waits for the next request from the DB and sets up the environment.
+        """
+        request_row = self._fetch_latest_request()
+        self._map_db_to_entities(request_row)
+        return self._get_state()
+
+    def _get_state(self):
+        """
+        Constructs state vector dynamically based on Config.DB_CONFIG['state_columns'].
+        """
+        state = []
+        
+        # 1. Task Features
+        # We map the config column names to attributes of the Task object or raw DB row
+        # For simplicity, we use the Entity objects we created, but we could use raw dicts
+        task_cols = Config.DB_CONFIG["state_columns"]["task"]
+        for col in task_cols:
+            # Map 'size' -> self.current_task.size, etc.
+            if hasattr(self.current_task, col):
+                state.append(getattr(self.current_task, col))
+            elif col == "cpu_req": state.append(self.current_task.cpu_req)
+            else: state.append(0.0) # Default for missing
+            
+        # 2. RSU Features
+        rsu_cols = Config.DB_CONFIG["state_columns"]["rsu"]
+        for col in rsu_cols:
+            if hasattr(self.active_rsu, col):
+                state.append(getattr(self.active_rsu, col))
+            elif col == "bandwidth": state.append(Config.BANDWIDTH_BASE) # Static fallback
+            else: state.append(0.0)
+
+        # 3. Neighbor Features
+        veh_cols = Config.DB_CONFIG["state_columns"]["vehicle"]
+        
+        # Sort candidates by distance (same as DummyEnv)
+        self.candidates.sort(key=lambda v: (v.pos_x - self.active_rsu.pos_x)**2 + (v.pos_y - self.active_rsu.pos_y)**2)
+        
+        # Take top K
+        selected_candidates = self.candidates[:Config.MAX_NEIGHBORS]
+        
+        for v in selected_candidates:
+            for col in veh_cols:
+                # Handle relative features if needed, or raw
+                # The user asked for dynamic updates. 
+                # If we want relative position, we need to calculate it.
+                val = 0.0
+                if col == "pos_x": val = (v.pos_x - self.active_rsu.pos_x) / Config.RSU_RANGE # Relative X
+                elif col == "pos_y": val = (v.pos_y - self.active_rsu.pos_y) / Config.RSU_RANGE # Relative Y
+                elif hasattr(v, col): val = getattr(v, col)
+                
+                # Normalize common fields if possible (heuristic)
+                if col == "speed": val /= Config.MAX_SPEED
+                if col == "cpu_avail": val /= 5000.0
+                
+                state.append(val)
+                
+        # Padding if fewer neighbors than MAX_NEIGHBORS
+        expected_len = Config.STATE_DIM
+        current_len = len(state)
+        if current_len < expected_len:
+            state.extend([0.0] * (expected_len - current_len))
+            
+        return np.array(state, dtype=np.float32)
+
+    def get_action_mask(self):
+        # Reuse the logic from IoVDummyEnv since we mapped to Entities
+        mask = np.zeros(Config.ACTION_DIM, dtype=np.float32)
+        for i, v in enumerate(self.candidates[:Config.MAX_NEIGHBORS]):
+            if v.battery_avail > 5.0 and v.memory_avail > self.current_task.size:
+                mask[i] = 1.0
+        
+        # 2. RSU (Infrastructure)
+        # Check if RSU has enough resources (heuristic)
+        if self.active_rsu.cpu_avail > self.current_task.cpu_req * 0.1: # Simple check
+             mask[Config.MAX_NEIGHBORS] = 1.0 
+        
+        # Local action removed
+        return mask
+
+    def _insert_decision(self, action, decision_type, target_id=None):
+        """
+        Inserts the agent's decision into the offloading_decisions table.
+        """
+        query = """
+            INSERT INTO offloading_decisions 
+            (task_id, vehicle_id, rsu_id, decision_time, decision_type, target_service_vehicle_id, 
+             confidence_score, estimated_completion_time, decision_reason, payload)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        # Use request time + small delta to simulate processing time
+        decision_time = self.current_task.created_time + 0.05 
+        
+        payload = json.dumps({"agent": "DDQN", "action": int(action)})
+        
+        try:
+            self.cursor.execute(query, (
+                self.current_task.task_id,
+                self.task_origin_vehicle.v_id,
+                self.active_rsu.rsu_id,
+                decision_time,
+                decision_type,
+                target_id,
+                1.0, 
+                0.0, 
+                "RL_Agent_Decision",
+                payload
+            ))
+            self.conn.commit()
+            print(f"[DB] Inserted decision {decision_type} for task {self.current_task.task_id}")
+        except Exception as e:
+            print(f"[DB-ERROR] Failed to insert decision: {e}")
+            self.conn.rollback()
+
+    def _wait_for_completion(self, task_id, timeout=10.0):
+        """
+        Polls offloaded_task_completions for the result of the task.
+        """
+        start_time = time.time()
+        poll_interval = 0.5
+        
+        while (time.time() - start_time) < timeout:
+            query = "SELECT * FROM offloaded_task_completions WHERE task_id = %s"
+            self.cursor.execute(query, (task_id,))
+            row = self.cursor.fetchone()
+            
+            if row:
+                return row
+            
+            time.sleep(poll_interval)
+            
+        print(f"[DB-WARN] Timeout waiting for completion of task {task_id}")
+        return None
+
+    def step(self, action):
+        done = True
+        
+        # 1. Decode Action
+        decision_type = "UNKNOWN"
+        target_id = None
+        
+        if action < Config.MAX_NEIGHBORS:
+            if action < len(self.candidates):
+                decision_type = "SERVICE_VEHICLE"
+                target_id = self.candidates[action].v_id
+            else:
+                # Invalid neighbor index
+                return self._get_state(), Config.REWARD_FAILURE, True, {"latency": 10.0, "success": 0, "reason": "Invalid_Neighbor"}
+                
+        elif action == Config.MAX_NEIGHBORS:
+            decision_type = "RSU"
+            target_id = None # RSU is implicit or we could put RSU ID
+            
+        else:
+            return self._get_state(), Config.REWARD_FAILURE, True, {"latency": 10.0, "success": 0, "reason": "Invalid_Action"}
+
+        # 2. Insert Decision to DB
+        self._insert_decision(action, decision_type, target_id)
+        
+        # 3. Wait for Simulator Result
+        # We use a timeout from Config or default
+        timeout = Config.DB_CONFIG.get("poll_timeout", 10.0)
+        result = self._wait_for_completion(self.current_task.task_id, timeout)
+        
+        if not result:
+            # Timeout or Error
+            return self._get_state(), Config.REWARD_FAILURE, True, {"latency": timeout, "success": 0, "reason": "Timeout"}
+            
+        # 4. Calculate Reward from Real Data
+        latency = result['total_latency']
+        success = result['success']
+        
+        # Energy estimation (since DB might not have it)
+        # We use the same physics model for energy as a proxy, or 0 if we don't care
+        energy = 0.0
+        if decision_type == "RSU":
+            energy = self.current_task.cpu_req * 0.001
+        else:
+            energy = self.current_task.cpu_req * 0.002
+
+        if success:
+            rew_lat = Config.W_LATENCY * (1.0 - min(latency/2.0, 1.0))
+            rew_ene = Config.W_ENERGY * (1.0 - min(energy/5.0, 1.0))
+            rew_dead = Config.W_DEADLINE * 1.0
+            reward = (rew_lat + rew_ene + rew_dead) * 10 * self.current_task.qos
+        else:
+            reward = Config.REWARD_FAILURE * self.current_task.qos
+
+        # Normalize
+        reward = reward / Config.REWARD_SCALE
+        
+        info = {
+            "latency": latency,
+            "energy": energy,
+            "success": 1 if success else 0,
+            "real_result": result
+        }
+        
+        return self._get_state(), reward, done, info
+
+    def close(self):
+        if self.cursor: self.cursor.close()
+        if self.conn: self.conn.close()

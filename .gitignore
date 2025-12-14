@@ -2,3 +2,5 @@ ddqn/*
 **/__pycache__/**
 DDQN-Offloading-algorithm/models/*
 DDQN-Offloading-algorithm/output/runs/*
+IoV-Digital-Twin-TaskOffloading-dt-task-offloading/*
+readme.md

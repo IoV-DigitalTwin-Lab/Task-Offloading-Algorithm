@@ -1,0 +1,15 @@
+{
+    "database": {
+        "host": "localhost",
+        "port": 5432,
+        "user": "postgres",
+        "password": "password",
+        "dbname": "iov_dt_db",
+        "poll_interval": 0.1,
+        "state_columns": {
+            "task": ["size", "cpu_req", "deadline", "qos"],
+            "rsu": ["cpu_avail", "memory_avail", "bandwidth", "queue_length"],
+            "vehicle": ["cpu_avail", "memory_avail", "battery_avail", "speed", "pos_x", "pos_y", "heading", "acceleration", "queue_length"]
+        }
+    }
+}

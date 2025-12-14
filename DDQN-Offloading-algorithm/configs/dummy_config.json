@@ -1,0 +1,7 @@
+{
+    "iov_network": {
+        "map_width": 3000,
+        "map_height": 1000,
+        "num_vehicles": 50
+    }
+}

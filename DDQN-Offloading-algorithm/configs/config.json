@@ -1,0 +1,73 @@
+{
+    "system": {
+        "device": "auto",
+        "seed": 42,
+        "log_dir": "output/runs",
+        "model_save_path": "models/best_ddqn_model.pth",
+        "plot_save_path": "output/training_results.png"
+    },
+    "iov_network": {
+        "rsu_range": 500,
+        "rsu_locations": [[500, 0], [1500, 0], [2500, 0]],
+        "map_width": 3000,
+        "map_height": 1000,
+        "num_vehicles": 50,
+        "max_neighbors": 5,
+        "dt": 0.5
+    },
+    "task_physics": {
+        "task_size_range": [1, 6],
+        "cpu_cycles_range": [100, 1000],
+        "deadline_range": [1.0, 5.0],
+        "qos_range": [1, 3]
+    },
+    "network_physics": {
+        "bandwidth_base": 20.0,
+        "bandwidth_var": 5.0,
+        "jitter_std": 0.05
+    },
+    "vehicle_constraints": {
+        "max_speed": 25.0,
+        "max_accel": 1.5,
+        "max_battery": 100.0,
+        "max_memory": 4096,
+        "battery_drain_rate": 0.2
+    },
+    "rewards": {
+        "reward_success": 15,
+        "reward_failure": -15,
+        "reward_handover_fail": -20,
+        "reward_scale": 10.0,
+        "w_latency": 0.6,
+        "w_energy": 0.2,
+        "w_deadline": 0.2
+    },
+    "ddqn": {
+        "vehicle_feat_dim": 9,
+        "hidden_dim": 256,
+        "episodes": 10000,
+        "lr": 0.0001,
+        "gamma": 0.99,
+        "tau": 0.005,
+        "epsilon_start": 1.0,
+        "epsilon_end": 0.02,
+        "epsilon_decay": 0.9997,
+        "batch_size": 256,
+        "memory_size": 100000,
+        "per_alpha": 0.6,
+        "per_beta": 0.4
+    },
+    "database": {
+        "host": "localhost",
+        "port": 5432,
+        "user": "postgres",
+        "password": "password",
+        "dbname": "iov_dt_db",
+        "poll_interval": 0.1,
+        "state_columns": {
+            "task": ["size", "cpu_req", "deadline", "qos"],
+            "rsu": ["cpu_avail", "mem_avail", "bandwidth"],
+            "vehicle": ["cpu_avail", "mem_avail", "battery_avail", "speed", "pos_x", "pos_y", "heading", "acceleration", "queue_length"]
+        }
+    }
+}

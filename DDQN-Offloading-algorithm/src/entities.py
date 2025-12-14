@@ -52,7 +52,7 @@ class Vehicle:
         ]
 
 class RSU:
-    def __init__(self, rsu_id, pos_x, pos_y, cpu_total, memory_total):
+    def __init__(self, rsu_id, pos_x, pos_y, cpu_total, memory_total, bandwidth=20.0):
         self.rsu_id = rsu_id
         self.pos_x = pos_x
         self.pos_y = pos_y
@@ -60,11 +60,13 @@ class RSU:
         self.cpu_avail = cpu_total
         self.memory_total = memory_total
         self.memory_avail = memory_total
+        self.bandwidth = bandwidth
         self.queue_length = 0
         
     def to_feature_vector(self):
         return [
             self.cpu_avail / 10000.0,
             self.memory_avail / 10000.0,
+            self.bandwidth / 100.0, # Normalize bandwidth
             self.queue_length / 50.0
         ]
