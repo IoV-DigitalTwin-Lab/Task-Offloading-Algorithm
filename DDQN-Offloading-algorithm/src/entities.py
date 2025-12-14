@@ -23,6 +23,11 @@ class Vehicle:
         self.battery_avail = Config.MAX_BATTERY
         self.current_tasks = 0
         
+        # Utilization metrics
+        self.cpu_utilization = 0.0
+        self.mem_utilization = 0.0
+        self.processing_count = 0
+        
         # Kinematics
         self.speed = 0.0        # m/s
         self.pos_x = 0.0        # m
@@ -34,7 +39,7 @@ class Vehicle:
     def to_relative_feature_vector(self, rsu_x, rsu_y):
         """
         Returns normalized vector:
-        [CPU, Mem, Battery, Speed, PosX, PosY, Heading, Accel, Tasks]
+        [CPU, Mem, Speed, PosX, PosY, Heading, Tasks, CPU_Util, Mem_Util, Processing]
         And relative positions to RSU.
         """
         rel_x = self.pos_x - rsu_x
@@ -42,13 +47,14 @@ class Vehicle:
         return [
             self.cpu_avail / 5000.0,
             self.memory_avail / Config.MAX_MEMORY,
-            self.battery_avail / Config.MAX_BATTERY,
             self.speed / Config.MAX_SPEED,
             rel_x / Config.RSU_RANGE,
             rel_y / Config.RSU_RANGE,
             self.heading / 360.0,              # Normalized Heading
-            (self.acceleration + 2) / 4.0,     # Normalized Accel (-2 to +2 -> 0 to 1)
-            self.current_tasks / 10.0
+            self.current_tasks / 10.0,
+            self.cpu_utilization,              # Already 0.0-1.0 from DB
+            self.mem_utilization,              # Already 0.0-1.0 from DB
+            self.processing_count / 10.0       # Normalize processing count
         ]
 
 class RSU:
@@ -63,10 +69,20 @@ class RSU:
         self.bandwidth = bandwidth
         self.queue_length = 0
         
+        # Utilization and processing metrics
+        self.cpu_utilization = 0.0
+        self.memory_utilization = 0.0
+        self.processing_count = 0
+        self.max_concurrent_tasks = 10
+        
     def to_feature_vector(self):
         return [
             self.cpu_avail / 10000.0,
             self.memory_avail / 10000.0,
             self.bandwidth / 100.0, # Normalize bandwidth
-            self.queue_length / 50.0
+            self.queue_length / 50.0,
+            self.cpu_utilization,    # Already 0.0-1.0 from DB
+            self.memory_utilization, # Already 0.0-1.0 from DB
+            self.processing_count / 20.0,
+            self.max_concurrent_tasks / 20.0
         ]

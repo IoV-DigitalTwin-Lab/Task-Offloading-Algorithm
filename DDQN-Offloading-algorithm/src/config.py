@@ -50,14 +50,19 @@ class Config:
     W_DEADLINE = 0.2
 
     # --- Dueling DDQN Settings ---
-    # Vehicle Features (9): 
-    # [CPU, Mem, Battery, Speed, PosX, PosY, Heading, Accel, Tasks]
-    VEHICLE_FEAT_DIM = 9
-    # State Dim: Task(4) + RSU(3) + Neighbors(9 * K)
-    STATE_DIM = 4 + 3 + (VEHICLE_FEAT_DIM * MAX_NEIGHBORS)
+    # Vehicle Features (10 for DB, 9 for dummy): 
+    # DB: [CPU, Mem, Speed, PosX, PosY, Heading, Tasks, CPU_Util, Mem_Util, Processing]
+    # Dummy: [CPU, Mem, Battery, Speed, PosX, PosY, Heading, Accel, Tasks]
+    VEHICLE_FEAT_DIM = 10
+    # RSU Features (8 for DB, 4 for dummy):
+    # DB: [CPU, Mem, Bandwidth, Queue, CPU_Util, Mem_Util, Processing, Max_Tasks]
+    # Dummy: [CPU, Mem, Bandwidth, Queue]
+    RSU_FEAT_DIM = 8
+    # State Dim: Task(4) + RSU(RSU_FEAT_DIM) + Neighbors(VEHICLE_FEAT_DIM * K)
+    STATE_DIM = 4 + RSU_FEAT_DIM + (VEHICLE_FEAT_DIM * MAX_NEIGHBORS)
 
-    # Action Space: K neighbors + 1 RSU (Local execution is removed as per requirements)
-    ACTION_DIM = MAX_NEIGHBORS + 1      
+    # Action Space: K neighbors + 1 RSU + 1 Local
+    ACTION_DIM = MAX_NEIGHBORS + 2      
     HIDDEN_DIM = 256
     EPISODS = 10000
     LR = 0.0001

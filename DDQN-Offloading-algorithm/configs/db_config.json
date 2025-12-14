@@ -1,15 +1,16 @@
 {
     "database": {
-        "host": "localhost",
+        "host": "129.153.172.173",
         "port": 5432,
-        "user": "postgres",
-        "password": "password",
-        "dbname": "iov_dt_db",
+        "user": "iov_user",
+        "password": "iov_password",
+        "dbname": "iov_db",
         "poll_interval": 0.1,
+        "poll_timeout": 10.0,
         "state_columns": {
             "task": ["size", "cpu_req", "deadline", "qos"],
-            "rsu": ["cpu_avail", "memory_avail", "bandwidth", "queue_length"],
-            "vehicle": ["cpu_avail", "memory_avail", "battery_avail", "speed", "pos_x", "pos_y", "heading", "acceleration", "queue_length"]
+            "rsu": ["cpu_avail", "memory_avail", "bandwidth", "queue_length", "cpu_utilization", "memory_utilization", "processing_count", "max_concurrent_tasks"],
+            "vehicle": ["cpu_avail", "memory_avail", "speed", "pos_x", "pos_y", "heading", "queue_length", "cpu_utilization", "mem_utilization", "processing_count"]
         }
     }
 }

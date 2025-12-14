@@ -16,13 +16,23 @@ class IoVDummyEnv:
         # 1. Initialize Multiple RSUs
         self.rsus = []
         for idx, (x, y) in enumerate(Config.RSU_LOCATIONS):
-            self.rsus.append(RSU(idx, x, y, cpu_total=10000, memory_total=8192))
+            rsu = RSU(idx, x, y, cpu_total=10000, memory_total=8192)
+            # Initialize utilization metrics for dummy env
+            rsu.cpu_utilization = 0.0
+            rsu.memory_utilization = 0.0
+            rsu.processing_count = 0
+            rsu.max_concurrent_tasks = 10
+            self.rsus.append(rsu)
             
         # 2. Initialize Vehicles across the WHOLE map
-        self.vehicles = [
-            Vehicle(i, random.randint(2000, 5000), random.randint(1024, 4096)) 
-            for i in range(Config.NUM_VEHICLES)
-        ]
+        self.vehicles = []
+        for i in range(Config.NUM_VEHICLES):
+            v = Vehicle(i, random.randint(2000, 5000), random.randint(1024, 4096))
+            # Initialize utilization metrics for dummy env
+            v.cpu_utilization = 0.0
+            v.mem_utilization = 0.0
+            v.processing_count = 0
+            self.vehicles.append(v)
         
         self._respawn_vehicles() # Initial Spawn
 
@@ -417,6 +427,10 @@ class IoVDatabaseEnv:
         self.task_origin_vehicle.heading = v_status.get('heading', 0)
         self.task_origin_vehicle.cpu_avail = v_status.get('cpu_available', 0)
         self.task_origin_vehicle.memory_avail = v_status.get('mem_available', 0)
+        self.task_origin_vehicle.cpu_utilization = v_status.get('cpu_utilization', 0.0)
+        self.task_origin_vehicle.mem_utilization = v_status.get('mem_utilization', 0.0)
+        self.task_origin_vehicle.processing_count = v_status.get('processing_count', 0)
+        self.task_origin_vehicle.current_tasks = v_status.get('queue_length', 0)
         
         # 3. Create RSU
         rsu_id = request_row['rsu_id']
@@ -458,6 +472,10 @@ class IoVDatabaseEnv:
             self.active_rsu.cpu_avail = rsu_status.get('cpu_available', cpu_total)
             self.active_rsu.memory_avail = rsu_status.get('memory_available', mem_total)
             self.active_rsu.queue_length = rsu_status.get('queue_length', 0)
+            self.active_rsu.cpu_utilization = rsu_status.get('cpu_utilization', 0.0)
+            self.active_rsu.memory_utilization = rsu_status.get('memory_utilization', 0.0)
+            self.active_rsu.processing_count = rsu_status.get('processing_count', 0)
+            self.active_rsu.max_concurrent_tasks = rsu_status.get('max_concurrent_tasks', 10)
         else:
              print(f"[DB-WARN] No status found for RSU {rsu_id} at {request_row['request_time']}")
         
@@ -480,6 +498,10 @@ class IoVDatabaseEnv:
             v.heading = row.get('heading', 0)
             v.cpu_avail = row.get('cpu_available', 0)
             v.memory_avail = row.get('mem_available', 0)
+            v.cpu_utilization = row.get('cpu_utilization', 0.0)
+            v.mem_utilization = row.get('mem_utilization', 0.0)
+            v.processing_count = row.get('processing_count', 0)
+            v.current_tasks = row.get('queue_length', 0)
             self.candidates.append(v)
             
         if not self.candidates:
@@ -540,6 +562,9 @@ class IoVDatabaseEnv:
                 # Normalize common fields if possible (heuristic)
                 if col == "speed": val /= Config.MAX_SPEED
                 if col == "cpu_avail": val /= 5000.0
+                if col == "memory_avail": val /= 4096.0
+                if col == "processing_count": val /= 10.0
+                # cpu_utilization and mem_utilization are already 0.0-1.0, no need to normalize
                 
                 state.append(val)
                 
@@ -555,12 +580,15 @@ class IoVDatabaseEnv:
         # Reuse the logic from IoVDummyEnv since we mapped to Entities
         mask = np.zeros(Config.ACTION_DIM, dtype=np.float32)
         for i, v in enumerate(self.candidates[:Config.MAX_NEIGHBORS]):
-            if v.battery_avail > 5.0 and v.memory_avail > self.current_task.size:
+            # Check if vehicle has enough resources (removed battery_avail check)
+            if v.memory_avail > self.current_task.size and v.cpu_avail > 0:
                 mask[i] = 1.0
         
         # 2. RSU (Infrastructure)
-        # Check if RSU has enough resources (heuristic)
-        if self.active_rsu.cpu_avail > self.current_task.cpu_req * 0.1: # Simple check
+        # Check if RSU has enough resources and capacity
+        if (self.active_rsu.cpu_avail > self.current_task.cpu_req * 0.1 and 
+            self.active_rsu.memory_avail > self.current_task.size and
+            self.active_rsu.processing_count < self.active_rsu.max_concurrent_tasks):
              mask[Config.MAX_NEIGHBORS] = 1.0 
         
         # Local action removed
