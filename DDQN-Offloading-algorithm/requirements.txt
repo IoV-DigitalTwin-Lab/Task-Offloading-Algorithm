@@ -1,4 +1,7 @@
-# Deep Learning Framework
+# Deep Learning Framework (CPU-only for faster Docker builds)
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+
 torch>=2.0.0
 tensorboard>=2.11.0
 

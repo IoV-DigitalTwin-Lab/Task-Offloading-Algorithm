@@ -365,22 +365,27 @@ class IoVDatabaseEnv:
         """Fetches the RSU status closest to the request time."""
         if rsu_id is None: return None
         
-        # Try to match rsu_id (cast to string as DB uses VARCHAR)
+        # Convert integer rsu_id to "RSU_X" format to match simulation format
+        rsu_id_str = f"RSU_{rsu_id}" if isinstance(rsu_id, int) else str(rsu_id)
+        
         query = """
             SELECT * FROM rsu_status 
             WHERE rsu_id = %s AND update_time <= %s
             ORDER BY update_time DESC 
             LIMIT 1
         """
-        self.cursor.execute(query, (str(rsu_id), request_time))
+        self.cursor.execute(query, (rsu_id_str, request_time))
         return self.cursor.fetchone()
 
     def _fetch_rsu_metadata(self, rsu_id):
         """Fetches static metadata for the RSU."""
         if rsu_id is None: return None
         
+        # Convert integer rsu_id to "RSU_X" format to match simulation format
+        rsu_id_str = f"RSU_{rsu_id}" if isinstance(rsu_id, int) else str(rsu_id)
+        
         query = "SELECT * FROM rsu_metadata WHERE rsu_id = %s"
-        self.cursor.execute(query, (str(rsu_id),))
+        self.cursor.execute(query, (rsu_id_str,))
         return self.cursor.fetchone()
 
     def _map_db_to_entities(self, request_row):
@@ -591,7 +596,9 @@ class IoVDatabaseEnv:
             self.active_rsu.processing_count < self.active_rsu.max_concurrent_tasks):
              mask[Config.MAX_NEIGHBORS] = 1.0 
         
-        # Local action removed
+        # 3. Fallback: Local execution or Drop (always available to prevent empty mask)
+        mask[Config.MAX_NEIGHBORS + 1] = 1.0
+        
         return mask
 
     def _insert_decision(self, action, decision_type, target_id=None):
@@ -667,6 +674,11 @@ class IoVDatabaseEnv:
         elif action == Config.MAX_NEIGHBORS:
             decision_type = "RSU"
             target_id = None # RSU is implicit or we could put RSU ID
+            
+        elif action == Config.MAX_NEIGHBORS + 1:
+            # Local execution or Drop as fallback
+            decision_type = "LOCAL"
+            target_id = self.task_origin_vehicle.v_id
             
         else:
             return self._get_state(), Config.REWARD_FAILURE, True, {"latency": 10.0, "success": 0, "reason": "Invalid_Action"}
