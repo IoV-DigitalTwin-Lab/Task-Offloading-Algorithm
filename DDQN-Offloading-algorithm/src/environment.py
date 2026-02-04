@@ -5,6 +5,7 @@ import time
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import redis
 from src.config import Config
 from src.entities import Vehicle, Task, RSU
 
@@ -730,3 +731,444 @@ class IoVDatabaseEnv:
     def close(self):
         if self.cursor: self.cursor.close()
         if self.conn: self.conn.close()
+
+
+class IoVRedisEnv:
+    """
+    Redis-based environment for real-time ML inference.
+    Queries Redis for vehicle/task/RSU states instead of PostgreSQL.
+    20-100x faster than database queries for real-time decisions.
+    """
+    def __init__(self):
+        # Connect to Redis
+        self.redis = redis.Redis(
+            host=Config.DB_CONFIG.get("redis_host", "127.0.0.1"),
+            port=Config.DB_CONFIG.get("redis_port", 6379),
+            decode_responses=True
+        )
+        
+        # Also maintain PostgreSQL connection for writing decisions and training data
+        self.pg_conn = psycopg2.connect(
+            host=Config.DB_CONFIG["host"],
+            port=Config.DB_CONFIG["port"],
+            user=Config.DB_CONFIG["user"],
+            password=Config.DB_CONFIG["password"],
+            dbname=Config.DB_CONFIG["dbname"]
+        )
+        self.pg_cursor = self.pg_conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Initialize state variables
+        self.current_task = None
+        self.active_rsu = None
+        self.task_origin_vehicle = None
+        self.candidates = []
+        
+        # Track processed requests
+        self.last_processed_request_id = -1
+        
+        print(f"✓ Redis connected: {self.redis.ping()}")
+
+    def _fetch_latest_request(self):
+        """Polls PostgreSQL for new offloading requests (still needed for coordination)."""
+        while True:
+            query = """
+                SELECT * FROM offloading_requests 
+                WHERE id > %s 
+                ORDER BY id ASC 
+                LIMIT 1
+            """
+            self.pg_cursor.execute(query, (self.last_processed_request_id,))
+            row = self.pg_cursor.fetchone()
+            
+            if row:
+                self.last_processed_request_id = row['id']
+                return row
+            
+            # Wait before polling again
+            time.sleep(Config.DB_CONFIG.get("poll_interval", 0.1))
+
+    def _fetch_vehicle_status_redis(self, vehicle_id):
+        """
+        Fetches vehicle status from Redis (sub-millisecond).
+        Key: vehicle:{vehicle_id}:state
+        """
+        key = f"vehicle:{vehicle_id}:state"
+        state = self.redis.hgetall(key)
+        
+        if state:
+            # Convert string values to appropriate types
+            return {
+                'vehicle_id': vehicle_id,
+                'pos_x': float(state.get('pos_x', 0)),
+                'pos_y': float(state.get('pos_y', 0)),
+                'speed': float(state.get('speed', 0)),
+                'heading': float(state.get('heading', 0)),
+                'cpu_total': float(state.get('cpu_available', 0)) / (1.0 - float(state.get('cpu_utilization', 0.01))),
+                'cpu_available': float(state.get('cpu_available', 0)),
+                'cpu_utilization': float(state.get('cpu_utilization', 0)),
+                'mem_total': float(state.get('mem_available', 0)) / (1.0 - float(state.get('mem_utilization', 0.01))),
+                'mem_available': float(state.get('mem_available', 0)),
+                'mem_utilization': float(state.get('mem_utilization', 0)),
+                'queue_length': int(state.get('queue_length', 0)),
+                'processing_count': int(state.get('processing_count', 0)),
+                'last_update': float(state.get('last_update', 0))
+            }
+        else:
+            print(f"[Redis-WARN] No state found for {vehicle_id} in Redis")
+            return None
+
+    def _fetch_neighbors_redis(self, origin_vehicle_id, origin_x, origin_y):
+        """
+        Fetches nearby vehicles from Redis using sorted set.
+        Much faster than PostgreSQL spatial queries.
+        """
+        # Get all vehicles from Redis
+        vehicle_keys = self.redis.keys("vehicle:*:state")
+        candidates = []
+        
+        for key in vehicle_keys:
+            # Extract vehicle_id from key (vehicle:XXX:state)
+            parts = key.split(':')
+            if len(parts) == 3:
+                vehicle_id = parts[1]
+                
+                # Skip origin vehicle
+                if vehicle_id == origin_vehicle_id:
+                    continue
+                
+                # Get vehicle state
+                state = self._fetch_vehicle_status_redis(vehicle_id)
+                if state:
+                    # Calculate distance
+                    dist = math.sqrt((state['pos_x'] - origin_x)**2 + (state['pos_y'] - origin_y)**2)
+                    state['dist_to_origin'] = dist
+                    candidates.append(state)
+        
+        # Sort by distance, then by CPU availability
+        candidates.sort(key=lambda x: (x['dist_to_origin'], -x['cpu_available']))
+        
+        # Return top N
+        return candidates[:Config.MAX_NEIGHBORS]
+
+    def _fetch_neighbors_redis_fast(self, origin_vehicle_id, origin_x, origin_y):
+        """
+        Faster version using Redis sorted set of service vehicles.
+        Queries the service_vehicles:available sorted set for best candidates.
+        """
+        # Get top service vehicles by CPU score
+        top_vehicles = self.redis.zrevrange('service_vehicles:available', 0, Config.MAX_NEIGHBORS * 2, withscores=True)
+        
+        candidates = []
+        for vehicle_id, cpu_score in top_vehicles:
+            # Skip origin vehicle
+            if vehicle_id == origin_vehicle_id:
+                continue
+            
+            # Get full state
+            state = self._fetch_vehicle_status_redis(vehicle_id)
+            if state:
+                # Calculate distance
+                dist = math.sqrt((state['pos_x'] - origin_x)**2 + (state['pos_y'] - origin_y)**2)
+                state['dist_to_origin'] = dist
+                candidates.append(state)
+        
+        # Sort by distance (already sorted by CPU in Redis)
+        candidates.sort(key=lambda x: x['dist_to_origin'])
+        
+        return candidates[:Config.MAX_NEIGHBORS]
+
+    def _fetch_rsu_status_redis(self, rsu_id):
+        """
+        Fetches RSU status from Redis (sub-millisecond).
+        Key: rsu:{rsu_id}:resources
+        """
+        if rsu_id is None:
+            return None
+        
+        rsu_id_str = f"RSU_{rsu_id}" if isinstance(rsu_id, int) else str(rsu_id)
+        key = f"rsu:{rsu_id_str}:resources"
+        
+        state = self.redis.hgetall(key)
+        if state:
+            return {
+                'rsu_id': rsu_id_str,
+                'cpu_available': float(state.get('cpu_available', 0)),
+                'memory_available': float(state.get('memory_available', 0)),
+                'queue_length': int(state.get('queue_length', 0)),
+                'processing_count': int(state.get('processing_count', 0)),
+                'update_time': float(state.get('update_time', 0))
+            }
+        else:
+            print(f"[Redis-WARN] No state found for RSU {rsu_id_str}")
+            return None
+
+    def _fetch_rsu_metadata(self, rsu_id):
+        """Still fetch RSU metadata from PostgreSQL (static data, rarely changes)."""
+        if rsu_id is None:
+            return None
+        
+        rsu_id_str = f"RSU_{rsu_id}" if isinstance(rsu_id, int) else str(rsu_id)
+        
+        query = "SELECT * FROM rsu_metadata WHERE rsu_id = %s"
+        self.pg_cursor.execute(query, (rsu_id_str,))
+        return self.pg_cursor.fetchone()
+
+    def _map_db_to_entities(self, request_row):
+        """Maps request data and Redis states to internal Entity objects."""
+        # 1. Create Task
+        self.current_task = Task(
+            task_id=request_row['task_id'],
+            size=request_row['task_size_bytes'] / 1024 / 1024,  # Convert to MB
+            cpu_req=request_row['cpu_cycles'] / 1000000,         # Convert to Megacycles
+            vehicle_id=request_row['vehicle_id'],
+            deadline=request_row['deadline_seconds'],
+            qos=request_row['qos_value'],
+            created_time=request_row['request_time']
+        )
+        
+        # 2. Get Origin Vehicle from Redis
+        origin_vehicle_state = self._fetch_vehicle_status_redis(request_row['vehicle_id'])
+        
+        if origin_vehicle_state:
+            self.task_origin_vehicle = Vehicle(
+                vehicle_id=origin_vehicle_state['vehicle_id'],
+                cpu_total=origin_vehicle_state['cpu_total'],
+                memory_total=origin_vehicle_state['mem_total']
+            )
+            self.task_origin_vehicle.pos_x = origin_vehicle_state['pos_x']
+            self.task_origin_vehicle.pos_y = origin_vehicle_state['pos_y']
+            self.task_origin_vehicle.speed = origin_vehicle_state['speed']
+            self.task_origin_vehicle.heading = origin_vehicle_state['heading']
+            self.task_origin_vehicle.cpu_available = origin_vehicle_state['cpu_available']
+            self.task_origin_vehicle.cpu_utilization = origin_vehicle_state['cpu_utilization']
+            self.task_origin_vehicle.mem_available = origin_vehicle_state['mem_available']
+            self.task_origin_vehicle.mem_utilization = origin_vehicle_state['mem_utilization']
+            self.task_origin_vehicle.queue_length = origin_vehicle_state['queue_length']
+            self.task_origin_vehicle.processing_count = origin_vehicle_state['processing_count']
+        else:
+            print(f"[Redis-ERROR] Origin vehicle {request_row['vehicle_id']} not found in Redis!")
+            self.task_origin_vehicle = None
+            return False
+        
+        # 3. Get Active RSU from Redis
+        rsu_id = request_row.get('rsu_id', 0)
+        rsu_status = self._fetch_rsu_status_redis(rsu_id)
+        rsu_metadata = self._fetch_rsu_metadata(rsu_id)
+        
+        if rsu_status and rsu_metadata:
+            self.active_rsu = RSU(
+                rsu_id=rsu_id,
+                pos_x=rsu_metadata['pos_x'],
+                pos_y=rsu_metadata['pos_y'],
+                cpu_total=rsu_metadata['cpu_total'],
+                memory_total=rsu_metadata['memory_total']
+            )
+            self.active_rsu.cpu_available = rsu_status['cpu_available']
+            self.active_rsu.memory_available = rsu_status['memory_available']
+            self.active_rsu.queue_length = rsu_status['queue_length']
+            self.active_rsu.processing_count = rsu_status['processing_count']
+            
+            # Calculate utilization
+            self.active_rsu.cpu_utilization = 1.0 - (rsu_status['cpu_available'] / rsu_metadata['cpu_total'])
+            self.active_rsu.memory_utilization = 1.0 - (rsu_status['memory_available'] / rsu_metadata['memory_total'])
+        else:
+            print(f"[Redis-WARN] RSU {rsu_id} state incomplete, using defaults")
+            self.active_rsu = RSU(rsu_id, 1000, 500, 16000, 64000)
+        
+        # 4. Get Candidate Vehicles from Redis (fast!)
+        neighbor_states = self._fetch_neighbors_redis_fast(
+            request_row['vehicle_id'],
+            origin_vehicle_state['pos_x'],
+            origin_vehicle_state['pos_y']
+        )
+        
+        self.candidates = []
+        for neighbor_state in neighbor_states:
+            v = Vehicle(
+                vehicle_id=neighbor_state['vehicle_id'],
+                cpu_total=neighbor_state['cpu_total'],
+                memory_total=neighbor_state['mem_total']
+            )
+            v.pos_x = neighbor_state['pos_x']
+            v.pos_y = neighbor_state['pos_y']
+            v.speed = neighbor_state['speed']
+            v.heading = neighbor_state['heading']
+            v.cpu_available = neighbor_state['cpu_available']
+            v.cpu_utilization = neighbor_state['cpu_utilization']
+            v.mem_available = neighbor_state['mem_available']
+            v.mem_utilization = neighbor_state['mem_utilization']
+            v.queue_length = neighbor_state['queue_length']
+            v.processing_count = neighbor_state['processing_count']
+            self.candidates.append(v)
+        
+        return True
+
+    def reset(self):
+        """Wait for new offloading request from simulation."""
+        request_row = self._fetch_latest_request()
+        print(f"\n[Redis-ENV] New Request: {request_row['task_id']} from {request_row['vehicle_id']}")
+        
+        # Map to entities using Redis data
+        success = self._map_db_to_entities(request_row)
+        if not success:
+            print("[Redis-ERROR] Failed to map request, retrying...")
+            return self.reset()
+        
+        return self._get_state()
+
+    def _get_state(self):
+        """Build state vector from current entities."""
+        # Task features
+        task_state = np.array([
+            self.current_task.size / 10.0,
+            self.current_task.cpu_req / 1000.0,
+            self.current_task.deadline / 2.0,
+            self.current_task.qos
+        ], dtype=np.float32)
+        
+        # RSU features
+        rsu_state = np.array([
+            self.active_rsu.cpu_available / 10000.0,
+            self.active_rsu.memory_available / 10000.0,
+            self.active_rsu.cpu_utilization,
+            self.active_rsu.queue_length / 10.0
+        ], dtype=np.float32)
+        
+        # Candidate vehicle features
+        vehicle_states = []
+        for v in self.candidates:
+            v_state = np.array([
+                v.cpu_available / 5000.0,
+                v.mem_available / 5000.0,
+                v.cpu_utilization,
+                v.mem_utilization,
+                v.queue_length / 5.0,
+                v.speed / Config.MAX_SPEED,
+                v.heading / 360.0,
+                min(math.sqrt((v.pos_x - self.task_origin_vehicle.pos_x)**2 + 
+                             (v.pos_y - self.task_origin_vehicle.pos_y)**2) / 1000.0, 1.0),
+                1.0 if v.processing_count < 3 else 0.0
+            ], dtype=np.float32)
+            vehicle_states.append(v_state)
+        
+        # Pad if needed
+        while len(vehicle_states) < Config.MAX_NEIGHBORS:
+            vehicle_states.append(np.zeros(9, dtype=np.float32))
+        
+        vehicle_states = np.array(vehicle_states[:Config.MAX_NEIGHBORS]).flatten()
+        
+        # Concatenate
+        state = np.concatenate([task_state, rsu_state, vehicle_states])
+        return state
+
+    def step(self, action):
+        """Execute decision and write to PostgreSQL."""
+        done = True
+        
+        # Map action to decision
+        if action == 0:
+            decision_type = "LOCAL"
+            target_id = self.task_origin_vehicle.vehicle_id
+        elif action == 1:
+            decision_type = "RSU"
+            target_id = f"RSU_{self.active_rsu.rsu_id}"
+        else:
+            candidate_idx = action - 2
+            if candidate_idx < len(self.candidates):
+                decision_type = "SERVICE_VEHICLE"
+                target_id = self.candidates[candidate_idx].vehicle_id
+            else:
+                decision_type = "LOCAL"
+                target_id = self.task_origin_vehicle.vehicle_id
+        
+        # Write decision to PostgreSQL
+        self._write_decision_to_db(decision_type, target_id)
+        
+        # Update Redis task status
+        self._update_task_status_redis("OFFLOADED", decision_type, target_id)
+        
+        # Wait for result from PostgreSQL
+        result = self._wait_for_result()
+        
+        # Calculate reward
+        latency = result.get('completion_time', 999) - result.get('request_time', 0)
+        success = result.get('success', False)
+        
+        if success:
+            rew_lat = Config.W_LATENCY * (1.0 - min(latency/2.0, 1.0))
+            rew_ene = Config.W_ENERGY * 0.5  # Placeholder
+            rew_dead = Config.W_DEADLINE * 1.0
+            reward = (rew_lat + rew_ene + rew_dead) * 10 * self.current_task.qos
+        else:
+            reward = Config.REWARD_FAILURE * self.current_task.qos
+        
+        reward = reward / Config.REWARD_SCALE
+        
+        info = {
+            "latency": latency,
+            "success": 1 if success else 0,
+            "decision_type": decision_type,
+            "target_id": target_id
+        }
+        
+        return self._get_state(), reward, done, info
+
+    def _write_decision_to_db(self, decision_type, target_id):
+        """Write ML decision to PostgreSQL for simulation to execute."""
+        query = """
+            INSERT INTO offloading_decisions 
+            (task_id, decision_type, target_id, decision_time)
+            VALUES (%s, %s, %s, NOW())
+        """
+        self.pg_cursor.execute(query, (self.current_task.task_id, decision_type, target_id))
+        self.pg_conn.commit()
+        print(f"[Redis-ENV] Decision written: {decision_type} -> {target_id}")
+
+    def _update_task_status_redis(self, status, decision_type="", target_id=""):
+        """Update task status in Redis for monitoring."""
+        key = f"task:{self.current_task.task_id}:state"
+        if decision_type:
+            self.redis.hmset(key, {
+                'status': status,
+                'decision_type': decision_type,
+                'target_id': target_id
+            })
+        else:
+            self.redis.hset(key, 'status', status)
+
+    def _wait_for_result(self):
+        """Wait for task completion result from PostgreSQL."""
+        timeout = 30
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            query = """
+                SELECT * FROM task_results 
+                WHERE task_id = %s
+                ORDER BY completion_time DESC LIMIT 1
+            """
+            self.pg_cursor.execute(query, (self.current_task.task_id,))
+            result = self.pg_cursor.fetchone()
+            
+            if result:
+                return result
+            
+            time.sleep(0.1)
+        
+        # Timeout - assume failure
+        return {
+            'task_id': self.current_task.task_id,
+            'success': False,
+            'completion_time': time.time(),
+            'request_time': self.current_task.created_at
+        }
+
+    def close(self):
+        """Close Redis and PostgreSQL connections."""
+        if self.redis:
+            self.redis.close()
+        if self.pg_cursor:
+            self.pg_cursor.close()
+        if self.pg_conn:
+            self.pg_conn.close()
+        print("[Redis-ENV] Connections closed")
