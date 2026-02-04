@@ -2,3 +2,13 @@ ddqn/*
 **/__pycache__/**
 DDQN-Offloading-algorithm/models/*
 DDQN-Offloading-algorithm/output/runs/*
+IoV-Digital-Twin-TaskOffloading-dt-task-offloading/*
+readme.md
+DDQN-Offloading-algorithm/CHANGES_VISUAL_SUMMARY.txt
+DDQN-Offloading-algorithm/PRE_FLIGHT_CHECKLIST.md
+DDQN-Offloading-algorithm/QUICK_REFERENCE.md
+DDQN-Offloading-algorithm/UPDATE_SUMMARY.md
+DDQN-Offloading-algorithm/VERIFICATION_CHECKLIST.md
+DDQN-Offloading-algorithm/verify_config.py
+DDQN-Offloading-algorithm/verify_setup.py
+DDQN-Offloading-algorithm/README_DOCKER.md
