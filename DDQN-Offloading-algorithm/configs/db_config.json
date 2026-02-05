@@ -5,6 +5,8 @@
         "user": "iov_user",
         "password": "iov_password",
         "dbname": "iov_db",
+        "redis_host": "127.0.0.1",
+        "redis_port": 6379,
         "poll_interval": 0.1,
         "poll_timeout": 10.0,
         "state_columns": {

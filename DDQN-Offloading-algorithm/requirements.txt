@@ -8,8 +8,9 @@ tensorboard>=2.11.0
 # Numerical Computing
 numpy>=1.24.0
 
-# Database
+# Database & Cache
 psycopg2-binary>=2.9.5
+redis>=4.5.0
 
 # Visualization
 matplotlib>=3.7.0
