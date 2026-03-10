@@ -5,14 +5,14 @@ import random
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 
-from src.environment import IoVDummyEnv, IoVDatabaseEnv, IoVRedisEnv
+from src.environment import IoVDummyEnv, IoVRedisEnv
 from src.agent import DDQNAgent
 from src.baselines import RandomAgent, GreedyComputeAgent, GreedyDistanceAgent, LocalAgent
 from src.config import Config
 
 def run():
     parser = argparse.ArgumentParser(description="Train Task Offloading DRL Agent")
-    parser.add_argument('--env', type=str, default='dummy', choices=['dummy', 'db', 'redis'], help='Environment type: dummy, db, or redis')
+    parser.add_argument('--env', type=str, default='dummy', choices=['dummy', 'redis'], help='Environment type: dummy or redis')
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(Config.MODEL_SAVE_PATH), exist_ok=True)
@@ -22,13 +22,9 @@ def run():
     writer = SummaryWriter(log_dir=Config.LOG_DIR)
     
     if args.env == 'redis':
-        Config.load_config("db_config.json")  # Use same config as db
-        print("Initializing Redis Environment (20-100x faster queries)...")
+        Config.load_config("redis_config.json")
+        print("Initializing Redis Environment...")
         env = IoVRedisEnv()
-    elif args.env == 'db':
-        Config.load_config("db_config.json")
-        print("Initializing Database Environment...")
-        env = IoVDatabaseEnv()
     else:
         Config.load_config("dummy_config.json")
         print("Initializing Dummy Environment...")

@@ -50,19 +50,30 @@ class Config:
     W_DEADLINE = 0.2
 
     # --- Dueling DDQN Settings ---
-    # Vehicle Features (10 for DB, 9 for dummy): 
-    # DB: [CPU, Mem, Speed, PosX, PosY, Heading, Tasks, CPU_Util, Mem_Util, Processing]
-    # Dummy: [CPU, Mem, Battery, Speed, PosX, PosY, Heading, Accel, Tasks]
-    VEHICLE_FEAT_DIM = 10
-    # RSU Features (8 for DB, 4 for dummy):
-    # DB: [CPU, Mem, Bandwidth, Queue, CPU_Util, Mem_Util, Processing, Max_Tasks]
-    # Dummy: [CPU, Mem, Bandwidth, Queue]
-    RSU_FEAT_DIM = 8
-    # State Dim: Task(4) + RSU(RSU_FEAT_DIM) + Neighbors(VEHICLE_FEAT_DIM * K)
-    STATE_DIM = 4 + RSU_FEAT_DIM + (VEHICLE_FEAT_DIM * MAX_NEIGHBORS)
+    # Dummy env: [CPU, Mem, Battery, Speed, PosX, PosY, Heading, Accel, Tasks]
+    VEHICLE_FEAT_DIM = 9
+    # Dummy RSU features: [CPU, Mem, Bandwidth, Queue]
+    RSU_FEAT_DIM = 4
+    # Dummy: Task(4) + RSU(4) + Neighbors(9 * K)
+    TASK_FEAT_DIM = 4
+    STATE_DIM = TASK_FEAT_DIM + RSU_FEAT_DIM + (VEHICLE_FEAT_DIM * MAX_NEIGHBORS)
 
-    # Action Space: K neighbors + 1 RSU + 1 Local
-    ACTION_DIM = MAX_NEIGHBORS + 2      
+    # Dummy action space: K service vehicles + 1 RSU + 1 local
+    ACTION_DIM = MAX_NEIGHBORS + 2
+
+    # --- Redis Settings (populated by load_config when using redis_config.json) ---
+    NUM_RSUS = 3
+    RSU_IDS = ["RSU_0", "RSU_1", "RSU_2"]
+    REDIS_HOST = "127.0.0.1"
+    REDIS_PORT = 6379
+    REDIS_POLL_INTERVAL = 0.05
+    REDIS_RESULT_TIMEOUT = 30.0
+    REDIS_TASK_FIELDS = ["mem_footprint_mb", "cpu_req_mcycles", "deadline_s", "qos"]
+    REDIS_RSU_FIELDS = ["cpu_available", "memory_available", "queue_length", "cpu_utilization"]
+    REDIS_VEHICLE_FIELDS = ["cpu_available", "mem_available", "cpu_utilization",
+                            "mem_utilization", "queue_length", "speed", "heading", "distance_to_origin"]
+    REDIS_NORMALIZATION = {}
+
     HIDDEN_DIM = 256
     EPISODS = 10000
     LR = 0.0001
@@ -77,7 +88,7 @@ class Config:
     PER_BETA = 0.4   # Importance Sampling correction (annealed to 1.0)
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # --- Database Settings ---
+    # --- Legacy Database Settings (unused, kept for compatibility) ---
     DB_CONFIG = {}
 
     @classmethod
@@ -112,7 +123,7 @@ class Config:
 
         cls.RSU_RANGE = _cfg["iov_network"]["rsu_range"]
         cls.RSU_LOCATIONS = _cfg["iov_network"]["rsu_locations"]
-        # Optional params (might not be in db_config)
+        # Optional params (might not be present in all configs)
         cls.MAP_WIDTH = _cfg["iov_network"].get("map_width", 3000)
         cls.MAP_HEIGHT = _cfg["iov_network"].get("map_height", 1000)
         cls.NUM_VEHICLES = _cfg["iov_network"].get("num_vehicles", 50)
@@ -144,24 +155,38 @@ class Config:
         cls.W_ENERGY = _cfg["rewards"]["w_energy"]
         cls.W_DEADLINE = _cfg["rewards"]["w_deadline"]
 
-        # Dynamic State Dimension
-        if "database" in _cfg:
-            cls.TASK_FEAT_DIM = len(_cfg["database"]["state_columns"]["task"])
-            cls.RSU_FEAT_DIM = len(_cfg["database"]["state_columns"]["rsu"])
-            cls.VEHICLE_FEAT_DIM = len(_cfg["database"]["state_columns"]["vehicle"])
-            cls.STATE_DIM = cls.TASK_FEAT_DIM + cls.RSU_FEAT_DIM + (cls.VEHICLE_FEAT_DIM * cls.MAX_NEIGHBORS)
-            cls.DB_CONFIG = _cfg["database"]
+        # Dynamic State/Action Dimensions
+        if "redis" in _cfg:
+            _redis = _cfg["redis"]
+            cls.REDIS_HOST = _redis.get("host", "127.0.0.1")
+            cls.REDIS_PORT = _redis.get("port", 6379)
+            cls.REDIS_POLL_INTERVAL = _redis.get("poll_interval", 0.05)
+            cls.REDIS_RESULT_TIMEOUT = _redis.get("result_timeout", 30.0)
+            cls.NUM_RSUS = _redis.get("num_rsus", 1)
+            cls.RSU_IDS = _redis.get("rsu_ids", [f"RSU_{i}" for i in range(cls.NUM_RSUS)])
+            
+            cols = _redis["state_columns"]
+            cls.REDIS_TASK_FIELDS    = cols["task"]
+            cls.REDIS_RSU_FIELDS     = cols["rsu"]
+            cls.REDIS_VEHICLE_FIELDS = cols["vehicle"]
+            cls.REDIS_NORMALIZATION  = _redis.get("normalization", {})
+            
+            cls.TASK_FEAT_DIM    = len(cls.REDIS_TASK_FIELDS)
+            cls.RSU_FEAT_DIM     = len(cls.REDIS_RSU_FIELDS)
+            cls.VEHICLE_FEAT_DIM = len(cls.REDIS_VEHICLE_FIELDS)
+            # State: task features + (RSU features × num_rsus) + (vehicle features × max_neighbors)
+            cls.STATE_DIM  = (cls.TASK_FEAT_DIM
+                              + cls.RSU_FEAT_DIM * cls.NUM_RSUS
+                              + cls.VEHICLE_FEAT_DIM * cls.MAX_NEIGHBORS)
+            # Action: N RSUs + K service vehicles (no local — vehicle decides that itself)
+            cls.ACTION_DIM = cls.NUM_RSUS + cls.MAX_NEIGHBORS
         else:
-            # Fallback for dummy if not using DB config structure
-            # But dummy config inherits common, so we should ensure common has defaults or handle it.
-            # For now, we assume dummy env uses hardcoded feature dims or we add them to common/dummy config.
-            # Let's stick to the previous hardcoded defaults for dummy if DB config is missing.
+            # Dummy env: fixed feature dims
             cls.VEHICLE_FEAT_DIM = 9
-            # Task(4) + RSU(4) + Neighbors(9 * K)
-            # RSU features: cpu, mem, bandwidth, queue
-            cls.STATE_DIM = 4 + 4 + (cls.VEHICLE_FEAT_DIM * cls.MAX_NEIGHBORS)
-
-        cls.ACTION_DIM = cls.MAX_NEIGHBORS + 2
+            cls.TASK_FEAT_DIM    = 4
+            cls.RSU_FEAT_DIM     = 4   # [cpu, mem, bandwidth, queue]
+            cls.STATE_DIM  = cls.TASK_FEAT_DIM + cls.RSU_FEAT_DIM + (cls.VEHICLE_FEAT_DIM * cls.MAX_NEIGHBORS)
+            cls.ACTION_DIM = cls.MAX_NEIGHBORS + 2  # K service vehicles + 1 RSU + 1 local
         cls.HIDDEN_DIM = _cfg["ddqn"]["hidden_dim"]
         cls.EPISODS = _cfg["ddqn"]["episodes"]
         cls.LR = _cfg["ddqn"]["lr"]

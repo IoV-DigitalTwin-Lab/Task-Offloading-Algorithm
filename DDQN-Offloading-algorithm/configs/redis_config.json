@@ -1,0 +1,58 @@
+{
+    "redis": {
+        "host": "127.0.0.1",
+        "port": 6379,
+        "poll_interval": 0.05,
+        "result_timeout": 30.0,
+        "num_rsus": 3,
+        "rsu_ids": ["RSU_0", "RSU_1", "RSU_2"],
+        "state_columns": {
+            "task": [
+                "mem_footprint_mb",
+                "cpu_req_mcycles",
+                "deadline_s",
+                "qos"
+            ],
+            "rsu": [
+                "cpu_available",
+                "memory_available",
+                "queue_length",
+                "cpu_utilization"
+            ],
+            "vehicle": [
+                "cpu_available",
+                "mem_available",
+                "cpu_utilization",
+                "mem_utilization",
+                "queue_length",
+                "speed",
+                "heading",
+                "distance_to_origin"
+            ]
+        },
+        "normalization": {
+            "task": {
+                "mem_footprint_mb": 100.0,
+                "cpu_req_mcycles": 1000.0,
+                "deadline_s": 10.0,
+                "qos": 3.0
+            },
+            "rsu": {
+                "cpu_available": 10000.0,
+                "memory_available": 10000.0,
+                "queue_length": 50.0,
+                "cpu_utilization": 1.0
+            },
+            "vehicle": {
+                "cpu_available": 5000.0,
+                "mem_available": 4096.0,
+                "cpu_utilization": 1.0,
+                "mem_utilization": 1.0,
+                "queue_length": 10.0,
+                "speed": 25.0,
+                "heading": 360.0,
+                "distance_to_origin": 1000.0
+            }
+        }
+    }
+}
