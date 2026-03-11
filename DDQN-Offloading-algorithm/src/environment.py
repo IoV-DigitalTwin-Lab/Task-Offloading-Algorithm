@@ -2,6 +2,7 @@ import numpy as np
 import math
 import random
 import time
+import types
 import json
 import redis
 from src.config import Config
@@ -306,11 +307,13 @@ class IoVRedisEnv:
         self.num_rsus       = Config.NUM_RSUS
 
         # Episode state
-        self.task_request    = {}   # raw dict from Redis request hash
-        self.rsu_states      = {}   # rsu_id -> state dict
-        self.candidates      = []   # ordered list of vehicle_id strings
-        self.candidate_states = []  # corresponding state dicts
-        self.active_rsu      = None # string id of the RSU that received the task
+        self.task_request     = {}   # raw dict from Redis request hash
+        self.rsu_states       = {}   # rsu_id -> state dict
+        self.candidate_states = []   # raw state dicts (for _build_state)
+        # Public SimpleNamespace objects consumed by baseline agents:
+        self.rsus       = []   # one per RSU in the network
+        self.candidates = []   # one per service-vehicle candidate
+        self.active_rsu = None # SimpleNamespace of RSU that received the task
 
     # ------------------------------------------------------------------
     # DATA FETCHING
@@ -450,10 +453,25 @@ class IoVRedisEnv:
         print(f"\n[Redis-ENV] New Request: task={request['task_id']} vehicle={request['vehicle_id']}")
 
         self.task_request = request
-        self.active_rsu   = request.get('rsu_id', self.rsu_ids[0])
+        active_rsu_id     = request.get('rsu_id', self.rsu_ids[0])
 
         # Fetch all RSU states
         self.rsu_states = {rsu_id: self._fetch_rsu_state(rsu_id) for rsu_id in self.rsu_ids}
+
+        # Build SimpleNamespace for each RSU (consumed by baseline agents)
+        self.rsus = [
+            types.SimpleNamespace(
+                rsu_id       = rsu_id,
+                cpu_avail    = self.rsu_states.get(rsu_id, {}).get('cpu_available', 0.0),
+                queue_length = self.rsu_states.get(rsu_id, {}).get('queue_length', 0),
+                pos_x        = self.rsu_states.get(rsu_id, {}).get('pos_x', 0.0),
+                pos_y        = self.rsu_states.get(rsu_id, {}).get('pos_y', 0.0),
+            )
+            for rsu_id in self.rsu_ids
+        ]
+        self.active_rsu = next(
+            (r for r in self.rsus if r.rsu_id == active_rsu_id), self.rsus[0]
+        )
 
         # Fetch origin vehicle state for position reference
         origin_state = self._fetch_vehicle_state(request['vehicle_id'])
@@ -461,10 +479,23 @@ class IoVRedisEnv:
             print(f"[Redis-WARN] Origin vehicle {request['vehicle_id']} not found, retrying...")
             return self.reset()
 
-        # Fetch candidate service vehicles
-        self.candidates, self.candidate_states = self._fetch_candidates(
+        # Fetch candidate service vehicles → raw dicts + SimpleNamespace objects
+        raw_ids, self.candidate_states = self._fetch_candidates(
             request['vehicle_id'], origin_state['pos_x'], origin_state['pos_y']
         )
+        self.candidates = [
+            types.SimpleNamespace(
+                vehicle_id   = s['vehicle_id'],
+                cpu_avail    = s.get('cpu_available', 0.0),
+                mem_avail    = s.get('mem_available', 0.0),
+                queue_length = s.get('queue_length', 0),
+                pos_x        = s.get('pos_x', 0.0),
+                pos_y        = s.get('pos_y', 0.0),
+                speed        = s.get('speed', 0.0),
+                heading      = s.get('heading', 0.0),
+            )
+            for s in self.candidate_states
+        ]
 
         return self._build_state()
 
@@ -491,73 +522,92 @@ class IoVRedisEnv:
         return mask
 
     def step(self, action):
-        """Execute the offloading decision and return (next_state, reward, done, info)."""
-        done = True
+        """Single-agent step (thin wrapper over step_multi for backward compat)."""
+        _, results = self.step_multi({'ddqn': action})
+        reward, info = results['ddqn']
+        return self._build_state(), reward, True, info
 
-        # Map action index → (decision_type, target_id)
-        if action < self.num_rsus:
-            decision_type = "RSU"
-            target_id     = self.rsu_ids[action]
-        else:
-            sv_idx = action - self.num_rsus
-            if sv_idx < len(self.candidates):
-                decision_type = "SERVICE_VEHICLE"
-                target_id     = self.candidates[sv_idx]
-            else:
-                # Fallback to the RSU that originally received the request
-                decision_type = "RSU"
-                target_id     = self.active_rsu
+    def step_multi(self, actions: dict):
+        """
+        Execute decisions for ALL agents on the SAME task atomically.
 
-        # Write decision to Redis for the simulator to consume
-        self._write_decision(target_id, decision_type)
+        actions: {'ddqn': int, 'random': int, ...}
+        Returns: (next_state, results_dict)
+            results_dict: {agent_name: (reward, info)}
+        """
+        # Map each action index → (decision_type, target_id)
+        agent_decisions = {
+            agent: self._action_to_target(act) for agent, act in actions.items()
+        }
 
-        # Poll for task completion result (Bug 4 fix: key is task:{id}:state)
-        result = self._wait_for_result()
+        # Write all decisions in one atomic pipeline call
+        task_id = self.task_request['task_id']
+        mapping = {'agents': ','.join(actions.keys())}
+        for agent, (dtype, tid) in agent_decisions.items():
+            mapping[f'{agent}_type']   = dtype
+            mapping[f'{agent}_target'] = tid
 
-        reward, info = self._calculate_reward(result, decision_type, target_id)
-        return self._build_state(), reward, done, info
+        pipe = self.r.pipeline()
+        pipe.hset(f"task:{task_id}:decisions", mapping=mapping)
+        pipe.expire(f"task:{task_id}:decisions", 300)
+        pipe.execute()
+
+        print(f"[Redis-ENV] Decisions written: { {a: t for a, (_, t) in agent_decisions.items()} }")
+
+        # Wait for per-agent results from simulator
+        results_raw = self._wait_for_multi_results(list(actions.keys()))
+
+        # Calculate reward for each agent
+        results = {}
+        for agent, (dtype, tid) in agent_decisions.items():
+            result   = results_raw.get(agent, {'status': 'FAILED', 'total_latency': 999, 'energy': 0.0})
+            reward, info = self._calculate_reward(result, dtype, tid)
+            results[agent] = (reward, info)
+
+        return self._build_state(), results
 
     # ------------------------------------------------------------------
     # DECISION & RESULT
     # ------------------------------------------------------------------
 
-    def _write_decision(self, target_id, decision_type):
-        """Write the offloading decision to Redis for the simulator to pick up."""
-        key = f"task:{self.task_request['task_id']}:decision"
-        self.r.hset(key, mapping={
-            'task_id':       self.task_request['task_id'],
-            'decision_type': decision_type,
-            'target_id':     target_id,
-            'decision_time': time.time(),
-        })
-        self.r.expire(key, 300)
-        print(f"[Redis-ENV] Decision written: {decision_type} → {target_id}")
+    def _action_to_target(self, action):
+        """Map action index → (decision_type, target_id)."""
+        if action < self.num_rsus:
+            return "RSU", self.rsu_ids[action]
+        sv_idx = action - self.num_rsus
+        if sv_idx < len(self.candidates):
+            return "SERVICE_VEHICLE", self.candidates[sv_idx].vehicle_id
+        # Fallback
+        return "RSU", self.rsu_ids[0]
 
-    def _wait_for_result(self):
+    def _wait_for_multi_results(self, agent_names: list):
         """
-        Poll task:{task_id}:state until the simulator writes the completion status.
-        The simulator writes COMPLETED_ON_TIME / COMPLETED_LATE / FAILED via
-        RedisDigitalTwin::updateTaskCompletion().
-        Energy is not yet reported by the simulator — dummy value 0.0 used for now.
+        Poll task:{id}:results until all agents' status fields are present.
+        Returns a dict: agent_name → {'status', 'total_latency', 'energy'}.
         """
-        task_id  = self.task_request['task_id']
-        key      = f"task:{task_id}:state"
-        deadline = time.time() + Config.REDIS_RESULT_TIMEOUT
+        task_id        = self.task_request['task_id']
+        key            = f"task:{task_id}:results"
+        required       = {f'{a}_status' for a in agent_names}
+        deadline       = time.time() + Config.REDIS_RESULT_TIMEOUT
 
         while time.time() < deadline:
-            data   = self.r.hgetall(key)
-            status = data.get('status', '')
-            if status in ('COMPLETED_ON_TIME', 'COMPLETED_LATE', 'FAILED'):
+            data = self.r.hgetall(key)
+            if required.issubset(data.keys()):
                 return {
-                    'status':          status,
-                    'processing_time': float(data.get('processing_time', 0)),
-                    'total_latency':   float(data.get('total_latency', 999)),
-                    'energy':          0.0,   # energy not yet reported by simulator (Bug 5)
+                    agent: {
+                        'status':        data.get(f'{agent}_status', 'FAILED'),
+                        'total_latency': float(data.get(f'{agent}_latency', 999)),
+                        'energy':        float(data.get(f'{agent}_energy',  0.0)),
+                    }
+                    for agent in agent_names
                 }
             time.sleep(Config.REDIS_POLL_INTERVAL)
 
-        print(f"[Redis-WARN] Timeout waiting for result of task {task_id}")
-        return {'status': 'FAILED', 'processing_time': 0, 'total_latency': 999, 'energy': 0.0}
+        print(f"[Redis-WARN] Timeout waiting for results of task {task_id}")
+        return {
+            a: {'status': 'FAILED', 'total_latency': 999, 'energy': 0.0}
+            for a in agent_names
+        }
 
     def _calculate_reward(self, result, decision_type, target_id):
         """Compute reward from the task execution result."""
