@@ -610,14 +610,39 @@ class IoVRedisEnv:
         }
 
     def _calculate_reward(self, result, decision_type, target_id):
-        """Compute reward from the task execution result."""
+        """Compute reward from the task execution result.
+
+        Energy normalization uses the IEEE TMC 2018 cubic model to derive
+        E_max from the actual task profile, so the normalization is always
+        task-specific and physically grounded, instead of a global constant.
+
+        E_loc_max = kappa_v * f_vehicle^2 * cpu_cycles
+        where kappa_v = 10e-28  J/(Hz^2 * cycle)  (IEEE TMC 2018 vehicle)
+              f       = 1e9 Hz  (1 GHz nominal vehicle CPU)
+        """
         success = result['status'] == 'COMPLETED_ON_TIME'
         latency = result['total_latency']
-        energy  = result['energy']   # 0.0 dummy until simulator reports it
+        energy  = result['energy']   # Joules, from simulator via Redis
+
+        # ── E_max: worst-case local execution energy for THIS task ──────────
+        # Uses the IEEE TMC 2018 cubic formula: E = κ × f² × cpu_cycles
+        # cpu_req_mcycles is stored in millions; convert back to cycles.
+        KAPPA_VEHICLE = 10e-28   # J / (Hz^2 * cycle) — ARM Cortex-A57 class
+        FREQ_NOMINAL  = 1.0e9   # Hz (1 GHz)
+        cpu_cycles    = self.task_request.get('cpu_req_mcycles', 1.0) * 1e6
+        e_max_local   = KAPPA_VEHICLE * (FREQ_NOMINAL ** 2) * cpu_cycles
+        # Guard against zero (e.g. dummy tasks with 0 cycles)
+        e_max         = max(e_max_local, 1e-9)
+        # ────────────────────────────────────────────────────────────────────
 
         if success:
-            rew_lat  = Config.W_LATENCY  * (1.0 - min(latency / max(self.task_request['deadline_s'], 1e-6), 1.0))
-            rew_ene  = Config.W_ENERGY   * (1.0 - min(energy / 5.0, 1.0))
+            # Latency reward: 1 − (latency / deadline).  Capped at [0, 1].
+            deadline = max(self.task_request.get('deadline_s', 1.0), 1e-6)
+            rew_lat  = Config.W_LATENCY  * (1.0 - min(latency / deadline, 1.0))
+
+            # Energy reward: 1 − (energy / E_max).  Lower energy → higher reward.
+            rew_ene  = Config.W_ENERGY   * (1.0 - min(energy / e_max, 1.0))
+
             rew_dead = Config.W_DEADLINE * 1.0
             reward   = (rew_lat + rew_ene + rew_dead) * Config.REWARD_SCALE * self.task_request['qos']
         else:
@@ -628,11 +653,13 @@ class IoVRedisEnv:
         info = {
             'latency':       latency,
             'energy':        energy,
+            'e_max':         e_max,
             'success':       1 if success else 0,
             'decision_type': decision_type,
             'target_id':     target_id,
         }
         return reward, info
+
 
     def close(self):
         self.r.close()
