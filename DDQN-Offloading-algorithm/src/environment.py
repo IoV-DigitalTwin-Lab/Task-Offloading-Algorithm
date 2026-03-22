@@ -344,14 +344,13 @@ class IoVRedisEnv:
         if not data:
             return {}
         cpu_avail = float(data.get('cpu_available', 0))
-        cpu_total = float(data.get('cpu_total', max(cpu_avail, 1)))
         return {
             'cpu_available':    cpu_avail,
             'memory_available': float(data.get('memory_available', 0)),
             # 50 is the practical max queue depth at an RSU under typical urban IoV load
             'queue_length':     int(float(data.get('queue_length', 0))),
             'processing_count': int(float(data.get('processing_count', 0))),
-            'cpu_utilization':  1.0 - (cpu_avail / cpu_total) if cpu_total > 0 else 0.0,
+            'cpu_utilization':  float(data.get('cpu_utilization', 0.0)),  # written directly by sim
             'pos_x':            float(data.get('pos_x', 0)),
             'pos_y':            float(data.get('pos_y', 0)),
             'sinr':             float(data.get('sinr', 0)),  # populated by simulator in future
