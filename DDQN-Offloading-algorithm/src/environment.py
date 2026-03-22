@@ -290,13 +290,15 @@ class IoVRedisEnv:
         WRITES: Redis  — offloading decision for the simulator to pick up
     """
 
-    def __init__(self):
+    def __init__(self, redis_db: int = 0, instance_id: int = 0):
+        self.instance_id = instance_id
         self.r = redis.Redis(
             host=Config.REDIS_HOST,
             port=Config.REDIS_PORT,
+            db=redis_db,
             decode_responses=True
         )
-        print(f"✓ Redis connected: {self.r.ping()}")
+        print(f"✓ [DRL-{instance_id}] Redis connected (db={redis_db}): {self.r.ping()}")
 
         # State-vector configuration loaded from redis_config.json
         self.task_fields    = Config.REDIS_TASK_FIELDS

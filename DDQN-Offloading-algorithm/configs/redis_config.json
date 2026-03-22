@@ -6,6 +6,11 @@
         "result_timeout": 30.0,
         "num_rsus": 3,
         "rsu_ids": ["RSU_0", "RSU_1", "RSU_2"],
+        "drl_instances": [
+            {"instance_id": 0, "rsu_id": "RSU_0", "redis_db": 0, "active": true},
+            {"instance_id": 1, "rsu_id": "RSU_1", "redis_db": 1, "active": true},
+            {"instance_id": 2, "rsu_id": "RSU_2", "redis_db": 2, "active": false}
+        ],
         "state_columns": {
             "task": [
                 "mem_footprint_mb",

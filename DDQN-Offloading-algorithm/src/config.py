@@ -64,6 +64,7 @@ class Config:
     # --- Redis Settings (populated by load_config when using redis_config.json) ---
     NUM_RSUS = 3
     RSU_IDS = ["RSU_0", "RSU_1", "RSU_2"]
+    DRL_INSTANCES = [{"instance_id": 0, "rsu_id": "RSU_0", "redis_db": 0, "active": True}]
     REDIS_HOST = "127.0.0.1"
     REDIS_PORT = 6379
     REDIS_POLL_INTERVAL = 0.05
@@ -170,6 +171,9 @@ class Config:
             cls.REDIS_RSU_FIELDS     = cols["rsu"]
             cls.REDIS_VEHICLE_FIELDS = cols["vehicle"]
             cls.REDIS_NORMALIZATION  = _redis.get("normalization", {})
+            cls.DRL_INSTANCES        = _redis.get("drl_instances", [
+                {"instance_id": 0, "rsu_id": cls.RSU_IDS[0], "redis_db": 0, "active": True}
+            ])
             
             cls.TASK_FEAT_DIM    = len(cls.REDIS_TASK_FIELDS)
             cls.RSU_FEAT_DIM     = len(cls.REDIS_RSU_FIELDS)
