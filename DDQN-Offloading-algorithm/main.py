@@ -91,12 +91,9 @@ def run():
                         help='Environment type: dummy or redis')
     args = parser.parse_args()
 
-    os.makedirs(os.path.dirname(Config.MODEL_SAVE_PATH), exist_ok=True)
-    os.makedirs(os.path.dirname(Config.PLOT_SAVE_PATH), exist_ok=True)
-    os.makedirs(Config.LOG_DIR, exist_ok=True)
-
     if args.env == 'redis':
-        Config.load_config("redis_config.json")
+        Config.load_config("redis_config.json")   # load FIRST so paths are correct
+        os.makedirs(Config.LOG_DIR, exist_ok=True)
         print("Initializing Redis Environment(s) ...")
         active = [i for i in Config.DRL_INSTANCES if i['active']]
         if not active:
@@ -118,6 +115,9 @@ def run():
 
     # --- Dummy path ---
     Config.load_config("dummy_config.json")
+    os.makedirs(os.path.dirname(Config.MODEL_SAVE_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(Config.PLOT_SAVE_PATH), exist_ok=True)
+    os.makedirs(Config.LOG_DIR, exist_ok=True)
     print("Initializing Dummy Environment...")
     env = IoVDummyEnv()
 

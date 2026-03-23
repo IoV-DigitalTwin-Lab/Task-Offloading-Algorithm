@@ -1,10 +1,39 @@
 {
+    "system": {
+        "device": "auto",
+        "seed": 42,
+        "log_dir": "output/runs"
+    },
+    "rewards": {
+        "reward_success": 15,
+        "reward_failure": -15,
+        "reward_handover_fail": -20,
+        "reward_scale": 10.0,
+        "w_latency": 0.6,
+        "w_energy": 0.2,
+        "w_deadline": 0.2
+    },
+    "ddqn": {
+        "hidden_dim": 256,
+        "episodes": 10000,
+        "lr": 0.0001,
+        "gamma": 0.99,
+        "tau": 0.005,
+        "epsilon_start": 1.0,
+        "epsilon_end": 0.02,
+        "epsilon_decay": 0.9997,
+        "batch_size": 256,
+        "memory_size": 100000,
+        "per_alpha": 0.6,
+        "per_beta": 0.4
+    },
     "redis": {
         "host": "127.0.0.1",
         "port": 6379,
         "poll_interval": 0.05,
         "result_timeout": 30.0,
         "num_rsus": 3,
+        "max_neighbors": 5,
         "rsu_ids": ["RSU_0", "RSU_1", "RSU_2"],
         "drl_instances": [
             {"instance_id": 0, "rsu_id": "RSU_0", "redis_db": 0, "active": true},
@@ -43,8 +72,8 @@
                 "qos": 3.0
             },
             "rsu": {
-                "cpu_available": 10000.0,
-                "memory_available": 10000.0,
+                "cpu_available": 32.0,
+                "memory_available": 64.0,
                 "queue_length": 50.0,
                 "cpu_utilization": 1.0
             },
