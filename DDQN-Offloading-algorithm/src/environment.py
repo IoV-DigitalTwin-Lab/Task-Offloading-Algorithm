@@ -635,6 +635,143 @@ class IoVRedisEnv:
         }
         return reward, info
 
+    # ------------------------------------------------------------------
+    # ASYNC HELPERS (used by the non-blocking training loop in main.py)
+    # ------------------------------------------------------------------
+
+    def _poll_request_nonblocking(self):
+        """
+        Non-blocking task fetch: returns a request dict or None if the queue is empty.
+        Uses lpop (returns immediately) instead of blpop (blocks until data arrives).
+        """
+        task_id = self.r.lpop('offloading_requests:queue')
+        if not task_id:
+            return None
+        data = self.r.hgetall(f"task:{task_id}:request")
+        if not data:
+            return None
+        return {
+            'task_id':          task_id,
+            'vehicle_id':       data.get('vehicle_id', ''),
+            'rsu_id':           data.get('rsu_id', self.rsu_ids[0]),
+            'mem_footprint_mb': float(data.get('mem_footprint_bytes', 0)) / (1024 * 1024),
+            'cpu_req_mcycles':  float(data.get('cpu_cycles', 0)) / 1e6,
+            'deadline_s':       float(data.get('deadline_seconds', 1.0)),
+            'qos':              float(data.get('qos_value', 1.0)),
+        }
+
+    def setup_from_request(self, request):
+        """
+        Populate env state from a pre-fetched request dict without blocking.
+        Returns the state vector, or None if the vehicle state is not yet in Redis.
+        Equivalent to reset() but works with an already-fetched request.
+        """
+        self.task_request = request
+        active_rsu_id     = request.get('rsu_id', self.rsu_ids[0])
+
+        self.rsu_states = {rsu_id: self._fetch_rsu_state(rsu_id) for rsu_id in self.rsu_ids}
+        self.rsus = [
+            types.SimpleNamespace(
+                rsu_id       = rsu_id,
+                cpu_avail    = self.rsu_states.get(rsu_id, {}).get('cpu_available', 0.0),
+                queue_length = self.rsu_states.get(rsu_id, {}).get('queue_length', 0),
+                pos_x        = self.rsu_states.get(rsu_id, {}).get('pos_x', 0.0),
+                pos_y        = self.rsu_states.get(rsu_id, {}).get('pos_y', 0.0),
+            )
+            for rsu_id in self.rsu_ids
+        ]
+        self.active_rsu = next(
+            (r for r in self.rsus if r.rsu_id == active_rsu_id), self.rsus[0]
+        )
+
+        origin_state = self._fetch_vehicle_state(request['vehicle_id'])
+        if origin_state is None:
+            return None  # vehicle state not yet in Redis — caller should skip this task
+
+        raw_ids, self.candidate_states = self._fetch_candidates(
+            request['vehicle_id'], origin_state['pos_x'], origin_state['pos_y']
+        )
+        self.candidates = [
+            types.SimpleNamespace(
+                vehicle_id   = s['vehicle_id'],
+                cpu_avail    = s.get('cpu_available', 0.0),
+                mem_avail    = s.get('mem_available', 0.0),
+                queue_length = s.get('queue_length', 0),
+                pos_x        = s.get('pos_x', 0.0),
+                pos_y        = s.get('pos_y', 0.0),
+                speed        = s.get('speed', 0.0),
+                heading      = s.get('heading', 0.0),
+            )
+            for s in self.candidate_states
+        ]
+        return self._build_state()
+
+    def write_decisions(self, task_id, actions):
+        """
+        Write all agent decisions to Redis atomically and return agent_decisions mapping.
+        Extracted from step_multi() so it can be called without blocking on results.
+        Returns: {agent_name: (decision_type, target_id)}
+        """
+        agent_decisions = {
+            agent: self._action_to_target(act) for agent, act in actions.items()
+        }
+        mapping = {'agents': ','.join(actions.keys())}
+        for agent, (dtype, tid) in agent_decisions.items():
+            mapping[f'{agent}_type']   = dtype
+            mapping[f'{agent}_target'] = tid
+
+        pipe = self.r.pipeline()
+        pipe.hset(f"task:{task_id}:decisions", mapping=mapping)
+        pipe.expire(f"task:{task_id}:decisions", 300)
+        pipe.execute()
+        return agent_decisions
+
+    def check_results_nonblocking(self, task_id, agent_names):
+        """
+        Non-blocking check: returns per-agent result dict if all agents have reported,
+        or None if results are not yet complete.
+        """
+        key      = f"task:{task_id}:results"
+        required = {f'{a}_status' for a in agent_names}
+        data     = self.r.hgetall(key)
+        if not required.issubset(data.keys()):
+            return None
+        return {
+            agent: {
+                'status':        data.get(f'{agent}_status', 'FAILED'),
+                'total_latency': float(data.get(f'{agent}_latency', 999)),
+                'energy':        float(data.get(f'{agent}_energy',  0.0)),
+            }
+            for agent in agent_names
+        }
+
+    def compute_reward_for(self, task_request, result, decision_type, target_id):
+        """
+        Standalone reward calculation given a stored task_request dict and an agent's result.
+        Used by the async loop so it can compute rewards for any pending task independent
+        of the current self.task_request state.
+        """
+        success = result['status'] == 'COMPLETED_ON_TIME'
+        latency = result['total_latency']
+        energy  = result['energy']
+
+        if success:
+            rew_lat  = Config.W_LATENCY  * (1.0 - min(latency / max(task_request['deadline_s'], 1e-6), 1.0))
+            rew_ene  = Config.W_ENERGY   * (1.0 - min(energy / 5.0, 1.0))
+            rew_dead = Config.W_DEADLINE * 1.0
+            reward   = (rew_lat + rew_ene + rew_dead) * Config.REWARD_SCALE * task_request['qos']
+        else:
+            reward = Config.REWARD_FAILURE * task_request['qos']
+
+        reward /= Config.REWARD_SCALE
+        return reward, {
+            'latency':       latency,
+            'energy':        energy,
+            'success':       1 if success else 0,
+            'decision_type': decision_type,
+            'target_id':     target_id,
+        }
+
     def close(self):
         self.r.close()
         print("[Redis-ENV] Connection closed")

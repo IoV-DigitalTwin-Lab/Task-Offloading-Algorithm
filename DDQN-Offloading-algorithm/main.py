@@ -4,6 +4,7 @@ import os
 import random
 import argparse
 import threading
+import time
 from torch.utils.tensorboard import SummaryWriter
 
 from src.environment import IoVDummyEnv, IoVRedisEnv
@@ -17,7 +18,20 @@ DUMMY_AGENTS  = ['ddqn', 'random', 'greedy_comp', 'greedy_dist']
 
 
 def _run_redis_instance(instance_cfg):
-    """Training loop for one RSU's DRL instance."""
+    """
+    Async training loop for one RSU's DRL instance.
+
+    Design:
+      - Accept a task → infer all agents → write decisions → add to pending_dict
+      - On every poll cycle, check ALL pending tasks for results (non-blocking)
+      - When results arrive, compute reward and add to replay buffer
+      - Batch-train periodically regardless of pending state
+
+    This avoids blocking on each task's result before processing the next one,
+    increasing throughput from ~0.5 tasks/s (serial) to many tasks in parallel.
+    Result ordering does not affect training quality because DDQN uses a replay buffer
+    (each (s, a, r, s') tuple is stored and sampled independently).
+    """
     iid      = instance_cfg['instance_id']
     redis_db = instance_cfg['redis_db']
     rsu_id   = instance_cfg['rsu_id']
@@ -39,47 +53,119 @@ def _run_redis_instance(instance_cfg):
     metrics         = {a: {"reward": [], "success": [], "latency": []} for a in REDIS_AGENTS}
     best_avg_reward = -float('inf')
 
-    print(f"[DRL-{iid}] Starting training for {rsu_id} on Redis DB {redis_db} ...")
+    # pending[task_id] = {state, actions, agent_decisions, task_request, timestamp}
+    pending              = {}
+    TIMEOUT              = Config.REDIS_RESULT_TIMEOUT  # seconds before discarding a pending task
+    TRAIN_EVERY          = 4                            # batch-train after every N completions
+    MAX_DRAIN_PER_CYCLE  = 20                           # max new tasks to ingest per poll cycle
+    completions_since_train = 0
+    episode              = 0
 
-    for episode in range(Config.EPISODS):
-        state = env.reset()
-        mask  = env.get_action_mask()
+    print(f"[DRL-{iid}] Starting ASYNC training for {rsu_id} on Redis DB {redis_db} ...")
 
-        actions = {
-            'ddqn':        ddqn_agent.select_action(state, mask=mask),
-            'random':      random_agent.select_action(mask),
-            'greedy_comp': greedy_comp_agent.select_action(env.candidates, env.rsus, mask),
-            'min_latency': min_latency_agent.select_action(
-                               env.candidates, env.rsus, mask, task_info=env.task_request),
-            'least_queue': least_queue_agent.select_action(env.candidates, env.rsus, mask),
-        }
+    while episode < Config.EPISODS:
 
-        next_state, results = env.step_multi(actions)
+        # ── 1. Drain incoming tasks (non-blocking, up to MAX_DRAIN_PER_CYCLE) ──
+        for _ in range(MAX_DRAIN_PER_CYCLE):
+            request = env._poll_request_nonblocking()
+            if request is None:
+                break  # queue empty
 
-        ddqn_reward, _ = results['ddqn']
-        ddqn_agent.store_transition(state, actions['ddqn'], ddqn_reward, next_state, done=True)
-        loss = ddqn_agent.train()
-        ddqn_agent.update_target_network_soft()
+            state = env.setup_from_request(request)
+            if state is None:
+                # vehicle state not yet in Redis — skip this task
+                print(f"[DRL-{iid}] Skipped task {request['task_id']}: vehicle state unavailable")
+                continue
 
-        for agent_name, (reward, info) in results.items():
-            metrics[agent_name]["reward"].append(reward)
-            metrics[agent_name]["success"].append(info['success'])
-            metrics[agent_name]["latency"].append(info['latency'])
+            mask = env.get_action_mask()
+            actions = {
+                'ddqn':        ddqn_agent.select_action(state, mask=mask),
+                'random':      random_agent.select_action(mask),
+                'greedy_comp': greedy_comp_agent.select_action(env.candidates, env.rsus, mask),
+                'min_latency': min_latency_agent.select_action(
+                                   env.candidates, env.rsus, mask, task_info=request),
+                'least_queue': least_queue_agent.select_action(env.candidates, env.rsus, mask),
+            }
 
-        writer.add_scalars("Rewards",      {a: results[a][0]           for a in REDIS_AGENTS}, episode)
-        writer.add_scalars("Success_Rate", {a: results[a][1]['success'] for a in REDIS_AGENTS}, episode)
-        writer.add_scalars("Latency",      {a: results[a][1]['latency'] for a in REDIS_AGENTS}, episode)
-        writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
-        if loss is not None:
-            writer.add_scalar("Loss", loss, episode)
+            agent_decisions = env.write_decisions(request['task_id'], actions)
+            pending[request['task_id']] = {
+                'state':           state,
+                'actions':         actions,
+                'agent_decisions': agent_decisions,
+                'task_request':    request,
+                'timestamp':       time.time(),
+            }
+            print(f"[DRL-{iid}] Task {request['task_id']} dispatched "
+                  f"({len(pending)} pending, ep={episode})")
 
-        if episode % 100 == 0:
-            avg_ddqn = np.mean(metrics["ddqn"]["reward"][-100:])
-            print(f"[DRL-{iid}] Ep {episode:5d} | DDQN: {avg_ddqn:.2f} | Eps: {ddqn_agent.epsilon:.3f}")
-            if avg_ddqn > best_avg_reward and episode > 1000:
-                best_avg_reward = avg_ddqn
-                ddqn_agent.save_model(model_path)
-                print(f"  >> [DRL-{iid}] New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
+        # ── 2. Check ALL pending tasks for results (non-blocking) ──
+        for task_id in list(pending.keys()):
+            entry = pending[task_id]
+
+            # Discard timed-out entries
+            if time.time() - entry['timestamp'] > TIMEOUT:
+                print(f"[DRL-{iid}] Task {task_id} timed out — discarding")
+                pending.pop(task_id)
+                continue
+
+            agent_names = list(entry['actions'].keys())
+            results_raw = env.check_results_nonblocking(task_id, agent_names)
+            if results_raw is None:
+                continue  # not ready yet — check again next cycle
+
+            pending.pop(task_id)
+
+            # done=True for every task-episode: next_state is unused in the target computation
+            next_state = entry['state']
+
+            for agent_name in agent_names:
+                result = results_raw[agent_name]
+                dtype, tid = entry['agent_decisions'][agent_name]
+                reward, info = env.compute_reward_for(entry['task_request'], result, dtype, tid)
+
+                metrics[agent_name]["reward"].append(reward)
+                metrics[agent_name]["success"].append(info['success'])
+                metrics[agent_name]["latency"].append(info['latency'])
+
+                if agent_name == 'ddqn':
+                    ddqn_agent.store_transition(
+                        entry['state'], entry['actions']['ddqn'],
+                        reward, next_state, done=True
+                    )
+
+            completions_since_train += 1
+            episode += 1
+
+            # TensorBoard — log only agents that have at least one data point
+            active = [a for a in REDIS_AGENTS if metrics[a]["reward"]]
+            if active:
+                writer.add_scalars("Rewards",      {a: metrics[a]["reward"][-1]  for a in active}, episode)
+                writer.add_scalars("Success_Rate", {a: metrics[a]["success"][-1] for a in active}, episode)
+                writer.add_scalars("Latency",      {a: metrics[a]["latency"][-1] for a in active}, episode)
+            writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
+
+            if episode % 100 == 0:
+                window = metrics["ddqn"]["reward"][-100:] if len(metrics["ddqn"]["reward"]) >= 100 \
+                         else metrics["ddqn"]["reward"]
+                avg_ddqn = np.mean(window) if window else 0.0
+                print(f"[DRL-{iid}] Ep {episode:5d} | DDQN: {avg_ddqn:.2f} "
+                      f"| Eps: {ddqn_agent.epsilon:.3f} | Pending: {len(pending)}")
+                if avg_ddqn > best_avg_reward and episode > 1000:
+                    best_avg_reward = avg_ddqn
+                    ddqn_agent.save_model(model_path)
+                    print(f"  >> [DRL-{iid}] New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
+
+        # ── 3. Batch-train periodically (every TRAIN_EVERY completions) ──
+        if completions_since_train >= TRAIN_EVERY:
+            loss = ddqn_agent.train()
+            ddqn_agent.update_target_network_soft()
+            if loss is not None:
+                writer.add_scalar("Loss", loss, episode)
+            completions_since_train = 0
+
+        # Brief sleep when idle to avoid busy-wait CPU spin
+        if not pending:
+            time.sleep(Config.REDIS_POLL_INTERVAL)
 
     writer.close()
     print(f"[DRL-{iid}] Training Complete. Logs: {log_dir}  Model: {model_path}")
