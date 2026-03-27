@@ -18,7 +18,7 @@ class Config:
     MAP_WIDTH     = 3000
     MAP_HEIGHT    = 1000
     NUM_VEHICLES  = 50
-    MAX_NEIGHBORS = 5
+    MAX_NEIGHBORS = 12  # Increased from 5 to handle multi-RSU candidates
     SEED          = 42
     DT            = 0.5
 

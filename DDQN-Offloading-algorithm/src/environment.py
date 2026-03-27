@@ -130,56 +130,72 @@ class IoVDummyEnv:
             if v.pos_y < -500: v.pos_y = -500
 
     def _get_state(self):
-        # 1. Identify Candidates inside the ACTIVE RSU's range
-        # Only vehicles connected to THIS RSU are valid candidates
-        potential_candidates = []
+        # 1. Collect ALL vehicles from all RSUs (multi-RSU enhancement)
+        # Previously: only vehicles within active RSU range
+        # Now: consider vehicles from ALL RSUs to enable global optimization
+        all_candidates = []
+
         for v in self.vehicles:
-            dist = math.sqrt((v.pos_x - self.active_rsu.pos_x)**2 + (v.pos_y - self.active_rsu.pos_y)**2)
-            if dist <= Config.RSU_RANGE:
-                potential_candidates.append(v)
-        
-        # Sort by signal strength (distance to Active RSU)
+            # Check if vehicle is within range of ANY RSU
+            for rsu in self.rsus:
+                dist_to_rsu = math.sqrt((v.pos_x - rsu.pos_x)**2 + (v.pos_y - rsu.pos_y)**2)
+                if dist_to_rsu <= Config.RSU_RANGE:
+                    all_candidates.append((v, rsu))  # (vehicle, its_serving_rsu)
+                    break  # Each vehicle served by closest RSU only
+
+        # 2. Sort by Euclidean distance to task-origin vehicle (global optimization)
+        # Previously: sorted by distance to active RSU
+        # Now: sorted by distance to the task's source vehicle
         self.candidates = sorted(
-            potential_candidates, 
-            key=lambda v: (v.pos_x - self.active_rsu.pos_x)**2 + (v.pos_y - self.active_rsu.pos_y)**2
-        )[:Config.MAX_NEIGHBORS]
-        
-        # 2. Build RELATIVE State Vector
+            all_candidates,
+            key=lambda item: (
+                (item[0].pos_x - self.task_origin_vehicle.pos_x)**2 +
+                (item[0].pos_y - self.task_origin_vehicle.pos_y)**2
+            )
+        )[:Config.MAX_NEIGHBORS]  # Select top 12 closest (was 5)
+
+        # Extract just the vehicles for feature extraction (RSU info already in state)
+        candidate_vehicles = [v for v, rsu in self.candidates]
+
+        # 3. Build State Vector
         state = []
         state.extend([self.current_task.size, self.current_task.cpu_req, self.current_task.deadline, self.current_task.qos])
         state.extend(self.active_rsu.to_feature_vector())
-        
-        for v in self.candidates:
-            # IMPORTANT: Use Relative Features!
-            state.extend(v.to_relative_feature_vector(self.active_rsu.pos_x, self.active_rsu.pos_y))
-            
+
+        # Use relative features relative to task-origin vehicle (not active RSU)
+        for v in candidate_vehicles:
+            state.extend(v.to_relative_feature_vector(self.task_origin_vehicle.pos_x, self.task_origin_vehicle.pos_y))
+
         # Padding
         expected_len = Config.STATE_DIM
         current_len = len(state)
         if current_len < expected_len:
             state.extend([0] * (expected_len - current_len))
-            
+
         return np.array(state, dtype=np.float32)
 
     def get_action_mask(self):
         """
         Returns a binary mask [1, 0, 1, ...] of size ACTION_DIM.
         1 = Valid Action, 0 = Invalid Action.
+        Accounts for multi-RSU candidates where self.candidates contains (vehicle, rsu) tuples.
         """
         mask = np.zeros(Config.ACTION_DIM, dtype=np.float32)
-        
-        # 1. Vehicle Candidates (Neighbors)
-        for i, v in enumerate(self.candidates):
+
+        # 1. Vehicle Candidates (Neighbors selected from all RSUs)
+        for i, item in enumerate(self.candidates):
+            # Extract vehicle from (vehicle, rsu) tuple
+            v = item[0] if isinstance(item, tuple) else item
             if v.battery_avail > 5.0 and v.memory_avail > self.current_task.size:
                 mask[i] = 1.0
-        
-        # 2. RSU (Infrastructure)
+
+        # 2. RSU (Infrastructure) - always accessible
         mask[Config.MAX_NEIGHBORS] = 1.0
-        
+
         # 3. Local Execution
         if self.task_origin_vehicle.battery_avail > 2.0:
             mask[Config.MAX_NEIGHBORS + 1] = 1.0
-        
+
         return mask
 
     def step(self, action):
@@ -205,8 +221,10 @@ class IoVDummyEnv:
         
         # --- CASE 1: Offload to Neighbor ---
         if action < len(self.candidates):
-            target = self.candidates[action]
-            
+            # Extract vehicle from (vehicle, rsu) tuple
+            target_item = self.candidates[action]
+            target = target_item[0] if isinstance(target_item, tuple) else target_item
+
             # Constraints Check (Redundant if masked, but good for safety)
             if target.battery_avail < 5.0 or target.memory_avail < self.current_task.size:
                  return self._get_state(), Config.REWARD_FAILURE * self.current_task.qos, True, \
