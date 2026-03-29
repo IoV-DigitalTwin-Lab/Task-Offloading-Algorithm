@@ -9,12 +9,39 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.environment import IoVDummyEnv, IoVRedisEnv
 from src.agent import DDQNAgent
-from src.baselines import RandomAgent, GreedyComputeAgent, MinLatencyAgent, LeastQueueAgent, GreedyDistanceAgent, LocalAgent
+from src.baselines import RandomAgent, GreedyComputeAgent, MinLatencyAgent, LeastQueueAgent, GreedyDistanceAgent
 from src.config import Config
 
 # Agent names used in both redis and dummy training loops
 REDIS_AGENTS  = ['ddqn', 'random', 'greedy_comp', 'min_latency', 'least_queue']
 DUMMY_AGENTS  = ['ddqn', 'random', 'greedy_comp', 'greedy_dist']
+
+
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+
+def _running_mean(data, window=100):
+    """Running mean over the most recent `window` entries."""
+    window_data = data[-window:] if len(data) >= window else data
+    return float(np.mean(window_data)) if window_data else 0.0
+
+
+def _decision_pct(decisions, dtype, window=50):
+    """Fraction of decisions matching `dtype` over the most recent `window` entries."""
+    recent = decisions[-window:] if len(decisions) >= window else decisions
+    if not recent:
+        return 0.0
+    return sum(1 for d in recent if d == dtype) / len(recent)
+
+
+def _action_to_dtype(action):
+    """Map a dummy-env action index to a decision-type string."""
+    if action == Config.MAX_NEIGHBORS:
+        return "RSU"
+    elif action < Config.MAX_NEIGHBORS:
+        return "SERVICE_VEHICLE"
+    return "LOCAL"
 
 
 def _run_redis_instance(instance_cfg):
@@ -50,7 +77,7 @@ def _run_redis_instance(instance_cfg):
     min_latency_agent = MinLatencyAgent()
     least_queue_agent = LeastQueueAgent()
 
-    metrics         = {a: {"reward": [], "success": [], "latency": []} for a in REDIS_AGENTS}
+    metrics         = {a: {"reward": [], "success": [], "latency": [], "energy": [], "decision_type": []} for a in REDIS_AGENTS}
     best_avg_reward = -float('inf')
 
     # pending[task_id] = {state, actions, agent_decisions, task_request, timestamp}
@@ -126,6 +153,8 @@ def _run_redis_instance(instance_cfg):
                 metrics[agent_name]["reward"].append(reward)
                 metrics[agent_name]["success"].append(info['success'])
                 metrics[agent_name]["latency"].append(info['latency'])
+                metrics[agent_name]["energy"].append(info.get('energy', 0.0))
+                metrics[agent_name]["decision_type"].append(info.get('decision_type', 'RSU'))
 
                 if agent_name == 'ddqn':
                     ddqn_agent.store_transition(
@@ -139,9 +168,13 @@ def _run_redis_instance(instance_cfg):
             # TensorBoard — log only agents that have at least one data point
             active = [a for a in REDIS_AGENTS if metrics[a]["reward"]]
             if active:
-                writer.add_scalars("Rewards",      {a: metrics[a]["reward"][-1]  for a in active}, episode)
-                writer.add_scalars("Success_Rate", {a: metrics[a]["success"][-1] for a in active}, episode)
-                writer.add_scalars("Latency",      {a: metrics[a]["latency"][-1] for a in active}, episode)
+                writer.add_scalars("Rewards",           {a: metrics[a]["reward"][-1]                                     for a in active}, episode)
+                writer.add_scalars("Rewards_Smoothed",  {a: _running_mean(metrics[a]["reward"])                          for a in active}, episode)
+                writer.add_scalars("Success_Rate",      {a: metrics[a]["success"][-1]                                    for a in active}, episode)
+                writer.add_scalars("Latency",           {a: metrics[a]["latency"][-1]                                    for a in active}, episode)
+                writer.add_scalars("Energy",            {a: metrics[a]["energy"][-1]                                     for a in active}, episode)
+                writer.add_scalars("Decision_RSU_Pct",  {a: _decision_pct(metrics[a]["decision_type"], "RSU")            for a in active}, episode)
+                writer.add_scalars("Decision_SV_Pct",   {a: _decision_pct(metrics[a]["decision_type"], "SERVICE_VEHICLE") for a in active}, episode)
             writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
 
             if episode % 100 == 0:
@@ -215,7 +248,7 @@ def run():
     greedy_comp_agent = GreedyComputeAgent()
     greedy_dist_agent = GreedyDistanceAgent()
 
-    metrics         = {a: {"reward": [], "success": [], "latency": []} for a in agent_names}
+    metrics         = {a: {"reward": [], "success": [], "latency": [], "energy": [], "decision_type": []} for a in agent_names}
     best_avg_reward = -float('inf')
 
     print(f"Starting Training on {Config.DEVICE}...")
@@ -234,6 +267,8 @@ def run():
         metrics["ddqn"]["reward"].append(reward)
         metrics["ddqn"]["success"].append(info['success'])
         metrics["ddqn"]["latency"].append(info['latency'])
+        metrics["ddqn"]["energy"].append(info.get('energy', 0.0))
+        metrics["ddqn"]["decision_type"].append(_action_to_dtype(action))
 
         random.seed(seed); np.random.seed(seed)
         _ = env.reset(); mask = env.get_action_mask()
@@ -242,6 +277,8 @@ def run():
         metrics["random"]["reward"].append(r_reward)
         metrics["random"]["success"].append(r_info['success'])
         metrics["random"]["latency"].append(r_info['latency'])
+        metrics["random"]["energy"].append(r_info.get('energy', 0.0))
+        metrics["random"]["decision_type"].append(_action_to_dtype(action))
 
         random.seed(seed); np.random.seed(seed)
         _ = env.reset(); mask = env.get_action_mask()
@@ -250,6 +287,8 @@ def run():
         metrics["greedy_comp"]["reward"].append(gc_reward)
         metrics["greedy_comp"]["success"].append(gc_info['success'])
         metrics["greedy_comp"]["latency"].append(gc_info['latency'])
+        metrics["greedy_comp"]["energy"].append(gc_info.get('energy', 0.0))
+        metrics["greedy_comp"]["decision_type"].append(_action_to_dtype(action))
 
         random.seed(seed); np.random.seed(seed)
         _ = env.reset(); mask = env.get_action_mask()
@@ -258,9 +297,17 @@ def run():
         metrics["greedy_dist"]["reward"].append(gd_reward)
         metrics["greedy_dist"]["success"].append(gd_info['success'])
         metrics["greedy_dist"]["latency"].append(gd_info['latency'])
+        metrics["greedy_dist"]["energy"].append(gd_info.get('energy', 0.0))
+        metrics["greedy_dist"]["decision_type"].append(_action_to_dtype(action))
 
         writer.add_scalars("Rewards", {
             "DDQN": reward, "Random": r_reward, "Greedy_Comp": gc_reward, "Greedy_Dist": gd_reward
+        }, episode)
+        writer.add_scalars("Rewards_Smoothed", {
+            "DDQN":        _running_mean(metrics["ddqn"]["reward"]),
+            "Random":      _running_mean(metrics["random"]["reward"]),
+            "Greedy_Comp": _running_mean(metrics["greedy_comp"]["reward"]),
+            "Greedy_Dist": _running_mean(metrics["greedy_dist"]["reward"]),
         }, episode)
         writer.add_scalars("Success_Rate", {
             "DDQN": info['success'], "Random": r_info['success'],
@@ -269,6 +316,24 @@ def run():
         writer.add_scalars("Latency", {
             "DDQN": info['latency'], "Random": r_info['latency'],
             "Greedy_Comp": gc_info['latency'], "Greedy_Dist": gd_info['latency']
+        }, episode)
+        writer.add_scalars("Energy", {
+            "DDQN":        info.get('energy', 0.0),
+            "Random":      r_info.get('energy', 0.0),
+            "Greedy_Comp": gc_info.get('energy', 0.0),
+            "Greedy_Dist": gd_info.get('energy', 0.0),
+        }, episode)
+        writer.add_scalars("Decision_RSU_Pct", {
+            "DDQN":        _decision_pct(metrics["ddqn"]["decision_type"],        "RSU"),
+            "Random":      _decision_pct(metrics["random"]["decision_type"],      "RSU"),
+            "Greedy_Comp": _decision_pct(metrics["greedy_comp"]["decision_type"], "RSU"),
+            "Greedy_Dist": _decision_pct(metrics["greedy_dist"]["decision_type"], "RSU"),
+        }, episode)
+        writer.add_scalars("Decision_SV_Pct", {
+            "DDQN":        _decision_pct(metrics["ddqn"]["decision_type"],        "SERVICE_VEHICLE"),
+            "Random":      _decision_pct(metrics["random"]["decision_type"],      "SERVICE_VEHICLE"),
+            "Greedy_Comp": _decision_pct(metrics["greedy_comp"]["decision_type"], "SERVICE_VEHICLE"),
+            "Greedy_Dist": _decision_pct(metrics["greedy_dist"]["decision_type"], "SERVICE_VEHICLE"),
         }, episode)
         writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
         if loss is not None:
