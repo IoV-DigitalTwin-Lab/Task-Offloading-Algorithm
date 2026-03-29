@@ -759,6 +759,7 @@ class IoVRedisEnv:
                 'status':        data.get(f'{agent}_status', 'FAILED'),
                 'total_latency': float(data.get(f'{agent}_latency', 999)),
                 'energy':        float(data.get(f'{agent}_energy',  0.0)),
+                'fail_reason':   data.get(f'{agent}_reason', 'UNKNOWN'),
             }
             for agent in agent_names
         }
@@ -786,6 +787,7 @@ class IoVRedisEnv:
             'latency':       latency,
             'energy':        energy,
             'success':       1 if success else 0,
+            'fail_reason':   result.get('fail_reason', 'NONE' if success else 'UNKNOWN'),
             'decision_type': decision_type,
             'target_id':     target_id,
         }

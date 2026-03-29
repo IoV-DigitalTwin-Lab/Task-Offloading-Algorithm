@@ -44,6 +44,21 @@ def _action_to_dtype(action):
     return "LOCAL"
 
 
+def _fail_reason_pct(reasons, target_reason, window=50):
+    """Fraction of entries matching target_reason in the most recent `window` entries."""
+    recent = reasons[-window:] if len(reasons) >= window else reasons
+    if not recent:
+        return 0.0
+    return sum(1 for r in recent if r == target_reason) / len(recent)
+
+
+def _qos_success_pct(qos_list, success_list, target_qos, window=100):
+    """Success rate for a specific QoS level (1, 2, or 3) over recent `window` entries."""
+    recent = list(zip(qos_list, success_list))[-window:]
+    filtered = [s for q, s in recent if int(round(q)) == target_qos]
+    return (sum(filtered) / len(filtered)) if filtered else 0.0
+
+
 def _run_redis_instance(instance_cfg):
     """
     Async training loop for one RSU's DRL instance.
@@ -77,7 +92,9 @@ def _run_redis_instance(instance_cfg):
     min_latency_agent = MinLatencyAgent()
     least_queue_agent = LeastQueueAgent()
 
-    metrics         = {a: {"reward": [], "success": [], "latency": [], "energy": [], "decision_type": []} for a in REDIS_AGENTS}
+    metrics         = {a: {"reward": [], "success": [], "latency": [], "energy": [],
+                           "decision_type": [], "fail_reason": [], "qos": []}
+                       for a in REDIS_AGENTS}
     best_avg_reward = -float('inf')
 
     # pending[task_id] = {state, actions, agent_decisions, task_request, timestamp}
@@ -86,6 +103,7 @@ def _run_redis_instance(instance_cfg):
     TRAIN_EVERY          = 4                            # batch-train after every N completions
     MAX_DRAIN_PER_CYCLE  = 20                           # max new tasks to ingest per poll cycle
     completions_since_train = 0
+    timeout_count        = 0
     episode              = 0
 
     print(f"[DRL-{iid}] Starting ASYNC training for {rsu_id} on Redis DB {redis_db} ...")
@@ -133,6 +151,7 @@ def _run_redis_instance(instance_cfg):
             if time.time() - entry['timestamp'] > TIMEOUT:
                 print(f"[DRL-{iid}] Task {task_id} timed out — discarding")
                 pending.pop(task_id)
+                timeout_count += 1
                 continue
 
             agent_names = list(entry['actions'].keys())
@@ -155,6 +174,8 @@ def _run_redis_instance(instance_cfg):
                 metrics[agent_name]["latency"].append(info['latency'])
                 metrics[agent_name]["energy"].append(info.get('energy', 0.0))
                 metrics[agent_name]["decision_type"].append(info.get('decision_type', 'RSU'))
+                metrics[agent_name]["fail_reason"].append(info.get('fail_reason', 'NONE'))
+                metrics[agent_name]["qos"].append(entry['task_request'].get('qos', 1.0))
 
                 if agent_name == 'ddqn':
                     ddqn_agent.store_transition(
@@ -168,14 +189,32 @@ def _run_redis_instance(instance_cfg):
             # TensorBoard — log only agents that have at least one data point
             active = [a for a in REDIS_AGENTS if metrics[a]["reward"]]
             if active:
-                writer.add_scalars("Rewards",           {a: metrics[a]["reward"][-1]                                     for a in active}, episode)
-                writer.add_scalars("Rewards_Smoothed",  {a: _running_mean(metrics[a]["reward"])                          for a in active}, episode)
-                writer.add_scalars("Success_Rate",      {a: metrics[a]["success"][-1]                                    for a in active}, episode)
-                writer.add_scalars("Latency",           {a: metrics[a]["latency"][-1]                                    for a in active}, episode)
-                writer.add_scalars("Energy",            {a: metrics[a]["energy"][-1]                                     for a in active}, episode)
-                writer.add_scalars("Decision_RSU_Pct",  {a: _decision_pct(metrics[a]["decision_type"], "RSU")            for a in active}, episode)
-                writer.add_scalars("Decision_SV_Pct",   {a: _decision_pct(metrics[a]["decision_type"], "SERVICE_VEHICLE") for a in active}, episode)
+                writer.add_scalars("Rewards",              {a: metrics[a]["reward"][-1]                                        for a in active}, episode)
+                writer.add_scalars("Rewards_Smoothed",     {a: _running_mean(metrics[a]["reward"])                             for a in active}, episode)
+                writer.add_scalars("Success_Rate",         {a: metrics[a]["success"][-1]                                       for a in active}, episode)
+                writer.add_scalars("Latency",              {a: metrics[a]["latency"][-1]                                       for a in active}, episode)
+                writer.add_scalars("Energy",               {a: metrics[a]["energy"][-1]                                        for a in active}, episode)
+                writer.add_scalars("Decision_RSU_Pct",     {a: _decision_pct(metrics[a]["decision_type"], "RSU")               for a in active}, episode)
+                writer.add_scalars("Decision_SV_Pct",      {a: _decision_pct(metrics[a]["decision_type"], "SERVICE_VEHICLE")   for a in active}, episode)
+                writer.add_scalars("Fail_Deadline_Rate",   {a: _fail_reason_pct(metrics[a]["fail_reason"], "DEADLINE_MISSED")  for a in active}, episode)
+                writer.add_scalars("Fail_Queue_Full_Rate", {a: _fail_reason_pct(metrics[a]["fail_reason"], "RSU_QUEUE_FULL")   for a in active}, episode)
+                writer.add_scalars("Fail_Routing_Rate",    {a: _fail_reason_pct(metrics[a]["fail_reason"], "SV_MAC_UNKNOWN") +
+                                                               _fail_reason_pct(metrics[a]["fail_reason"], "NEIGHBOR_RSU_UNKNOWN")
+                                                                                                                               for a in active}, episode)
+                writer.add_scalars("QoS_Success_Rate", {
+                    f"{a}_qos1": _qos_success_pct(metrics[a]["qos"], metrics[a]["success"], 1)
+                    for a in active
+                }, episode)
+                writer.add_scalars("QoS_Success_Rate", {
+                    f"{a}_qos2": _qos_success_pct(metrics[a]["qos"], metrics[a]["success"], 2)
+                    for a in active
+                }, episode)
+                writer.add_scalars("QoS_Success_Rate", {
+                    f"{a}_qos3": _qos_success_pct(metrics[a]["qos"], metrics[a]["success"], 3)
+                    for a in active
+                }, episode)
             writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
+            writer.add_scalar("Task_Timeout_Rate", timeout_count / max(episode, 1), episode)
 
             if episode % 100 == 0:
                 window = metrics["ddqn"]["reward"][-100:] if len(metrics["ddqn"]["reward"]) >= 100 \
@@ -248,7 +287,9 @@ def run():
     greedy_comp_agent = GreedyComputeAgent()
     greedy_dist_agent = GreedyDistanceAgent()
 
-    metrics         = {a: {"reward": [], "success": [], "latency": [], "energy": [], "decision_type": []} for a in agent_names}
+    metrics         = {a: {"reward": [], "success": [], "latency": [], "energy": [],
+                           "decision_type": [], "fail_reason": [], "qos": []}
+                       for a in agent_names}
     best_avg_reward = -float('inf')
 
     print(f"Starting Training on {Config.DEVICE}...")
@@ -259,6 +300,7 @@ def run():
 
         random.seed(seed); np.random.seed(seed)
         state = env.reset(); mask = env.get_action_mask()
+        ep_qos = env.current_task.qos  # same for all agents (same seed)
         action = ddqn_agent.select_action(state, mask=mask)
         next_state, reward, done, info = env.step(action)
         ddqn_agent.store_transition(state, action, reward, next_state, done)
@@ -269,6 +311,8 @@ def run():
         metrics["ddqn"]["latency"].append(info['latency'])
         metrics["ddqn"]["energy"].append(info.get('energy', 0.0))
         metrics["ddqn"]["decision_type"].append(_action_to_dtype(action))
+        metrics["ddqn"]["fail_reason"].append('NONE' if info['success'] else info.get('reason', 'DEADLINE_MISSED'))
+        metrics["ddqn"]["qos"].append(ep_qos)
 
         random.seed(seed); np.random.seed(seed)
         _ = env.reset(); mask = env.get_action_mask()
@@ -279,6 +323,8 @@ def run():
         metrics["random"]["latency"].append(r_info['latency'])
         metrics["random"]["energy"].append(r_info.get('energy', 0.0))
         metrics["random"]["decision_type"].append(_action_to_dtype(action))
+        metrics["random"]["fail_reason"].append('NONE' if r_info['success'] else r_info.get('reason', 'DEADLINE_MISSED'))
+        metrics["random"]["qos"].append(ep_qos)
 
         random.seed(seed); np.random.seed(seed)
         _ = env.reset(); mask = env.get_action_mask()
@@ -289,6 +335,8 @@ def run():
         metrics["greedy_comp"]["latency"].append(gc_info['latency'])
         metrics["greedy_comp"]["energy"].append(gc_info.get('energy', 0.0))
         metrics["greedy_comp"]["decision_type"].append(_action_to_dtype(action))
+        metrics["greedy_comp"]["fail_reason"].append('NONE' if gc_info['success'] else gc_info.get('reason', 'DEADLINE_MISSED'))
+        metrics["greedy_comp"]["qos"].append(ep_qos)
 
         random.seed(seed); np.random.seed(seed)
         _ = env.reset(); mask = env.get_action_mask()
@@ -299,6 +347,8 @@ def run():
         metrics["greedy_dist"]["latency"].append(gd_info['latency'])
         metrics["greedy_dist"]["energy"].append(gd_info.get('energy', 0.0))
         metrics["greedy_dist"]["decision_type"].append(_action_to_dtype(action))
+        metrics["greedy_dist"]["fail_reason"].append('NONE' if gd_info['success'] else gd_info.get('reason', 'DEADLINE_MISSED'))
+        metrics["greedy_dist"]["qos"].append(ep_qos)
 
         writer.add_scalars("Rewards", {
             "DDQN": reward, "Random": r_reward, "Greedy_Comp": gc_reward, "Greedy_Dist": gd_reward
@@ -335,6 +385,24 @@ def run():
             "Greedy_Comp": _decision_pct(metrics["greedy_comp"]["decision_type"], "SERVICE_VEHICLE"),
             "Greedy_Dist": _decision_pct(metrics["greedy_dist"]["decision_type"], "SERVICE_VEHICLE"),
         }, episode)
+        writer.add_scalars("Fail_Deadline_Rate", {
+            "DDQN":        _fail_reason_pct(metrics["ddqn"]["fail_reason"],        "DEADLINE_MISSED"),
+            "Random":      _fail_reason_pct(metrics["random"]["fail_reason"],      "DEADLINE_MISSED"),
+            "Greedy_Comp": _fail_reason_pct(metrics["greedy_comp"]["fail_reason"], "DEADLINE_MISSED"),
+            "Greedy_Dist": _fail_reason_pct(metrics["greedy_dist"]["fail_reason"], "DEADLINE_MISSED"),
+        }, episode)
+        writer.add_scalars("Fail_Handover_Rate", {
+            "DDQN":        _fail_reason_pct(metrics["ddqn"]["fail_reason"],        "Handover_Fail"),
+            "Random":      _fail_reason_pct(metrics["random"]["fail_reason"],      "Handover_Fail"),
+            "Greedy_Comp": _fail_reason_pct(metrics["greedy_comp"]["fail_reason"], "Handover_Fail"),
+            "Greedy_Dist": _fail_reason_pct(metrics["greedy_dist"]["fail_reason"], "Handover_Fail"),
+        }, episode)
+        writer.add_scalars("QoS_Success_Rate", dict(
+            **{f"DDQN_qos{q}":        _qos_success_pct(metrics["ddqn"]["qos"],        metrics["ddqn"]["success"],        q) for q in (1, 2, 3)},
+            **{f"Random_qos{q}":      _qos_success_pct(metrics["random"]["qos"],      metrics["random"]["success"],      q) for q in (1, 2, 3)},
+            **{f"Greedy_Comp_qos{q}": _qos_success_pct(metrics["greedy_comp"]["qos"], metrics["greedy_comp"]["success"], q) for q in (1, 2, 3)},
+            **{f"Greedy_Dist_qos{q}": _qos_success_pct(metrics["greedy_dist"]["qos"], metrics["greedy_dist"]["success"], q) for q in (1, 2, 3)},
+        ), episode)
         writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
         if loss is not None:
             writer.add_scalar("Loss", loss, episode)
