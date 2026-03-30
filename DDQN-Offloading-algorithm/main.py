@@ -108,6 +108,21 @@ def _run_redis_instance(instance_cfg):
 
     print(f"[DRL-{iid}] Starting ASYNC training for {rsu_id} on Redis DB {redis_db} ...")
 
+    # ── Startup: wait until vehicle state keys appear in Redis ──────────────
+    # Vehicles send heartbeats every ~1s; we need at least one state before training.
+    # Without this wait, every task is skipped (state=None) and the simulator stalls.
+    _wait_start = time.time()
+    _MAX_STARTUP_WAIT = 40  # seconds
+    print(f"[DRL-{iid}] Waiting for vehicle states in Redis (up to {_MAX_STARTUP_WAIT}s)...")
+    while time.time() - _wait_start < _MAX_STARTUP_WAIT:
+        keys = env.r.keys('vehicle:*:state')
+        if keys:
+            print(f"[DRL-{iid}] Found {len(keys)} vehicle state(s). Starting training loop.")
+            break
+        time.sleep(1.0)
+    else:
+        print(f"[DRL-{iid}] WARNING: no vehicle states after {_MAX_STARTUP_WAIT}s — starting anyway.")
+
     while episode < Config.EPISODS:
 
         # ── 1. Drain incoming tasks (non-blocking, up to MAX_DRAIN_PER_CYCLE) ──
@@ -118,8 +133,17 @@ def _run_redis_instance(instance_cfg):
 
             state = env.setup_from_request(request)
             if state is None:
-                # vehicle state not yet in Redis — skip this task
-                print(f"[DRL-{iid}] Skipped task {request['task_id']}: vehicle state unavailable")
+                # Vehicle state still unavailable — write fallback RSU decision so the
+                # simulator is not left waiting indefinitely for a decision that never arrives.
+                pipe = env.r.pipeline()
+                fallback_map = {'agents': ','.join(REDIS_AGENTS)}
+                for _a in REDIS_AGENTS:
+                    fallback_map[f'{_a}_type']   = 'RSU'
+                    fallback_map[f'{_a}_target'] = request.get('rsu_id', env.rsu_ids[0])
+                pipe.hset(f"task:{request['task_id']}:decisions", mapping=fallback_map)
+                pipe.expire(f"task:{request['task_id']}:decisions", 300)
+                pipe.execute()
+                print(f"[DRL-{iid}] Task {request['task_id']}: vehicle state missing — fallback RSU decision written")
                 continue
 
             mask = env.get_action_mask()

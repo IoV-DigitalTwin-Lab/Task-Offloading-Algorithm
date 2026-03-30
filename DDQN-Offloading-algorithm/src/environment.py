@@ -746,20 +746,23 @@ class IoVRedisEnv:
 
     def check_results_nonblocking(self, task_id, agent_names):
         """
-        Non-blocking check: returns per-agent result dict if all agents have reported,
-        or None if results are not yet complete.
+        Non-blocking check: returns per-agent result dict once ddqn has reported.
+        Missing baseline agents get a TIMEOUT placeholder so the training loop
+        can still use the ddqn result for DDQN training.
+        Returns None only if ddqn hasn't reported yet.
         """
-        key      = f"task:{task_id}:results"
-        required = {f'{a}_status' for a in agent_names}
-        data     = self.r.hgetall(key)
-        if not required.issubset(data.keys()):
+        key  = f"task:{task_id}:results"
+        data = self.r.hgetall(key)
+        # Must have at least ddqn results to proceed
+        if 'ddqn_status' not in data:
             return None
         return {
             agent: {
                 'status':        data.get(f'{agent}_status', 'FAILED'),
                 'total_latency': float(data.get(f'{agent}_latency', 999)),
                 'energy':        float(data.get(f'{agent}_energy',  0.0)),
-                'fail_reason':   data.get(f'{agent}_reason', 'UNKNOWN'),
+                'fail_reason':   data.get(f'{agent}_reason',
+                                          'TIMEOUT' if f'{agent}_status' not in data else 'UNKNOWN'),
             }
             for agent in agent_names
         }

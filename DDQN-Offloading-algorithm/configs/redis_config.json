@@ -31,7 +31,7 @@
         "host": "127.0.0.1",
         "port": 6379,
         "poll_interval": 0.05,
-        "result_timeout": 5.0,
+        "result_timeout": 60.0,
         "num_rsus": 3,
         "max_neighbors": 5,
         "rsu_ids": ["RSU_0", "RSU_1", "RSU_2"],
