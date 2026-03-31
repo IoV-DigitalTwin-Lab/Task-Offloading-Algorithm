@@ -15,6 +15,6 @@ DDQN-Offloading-algorithm/README_DOCKER.md
 DDQN-Offloading-algorithm/REDIS_ML_INTEGRATION.md
 DDQN-Offloading-algorithm/REDIS_PRIMARY_ARCHITECTURE.md
 DDQN-Offloading-algorithm/REDIS_POSTGRES_ARCHITECTURE.md
-DDQN-Offloading-algorithm/filtered.log
+DDQN-Offloading-algorithm/output/*
 DDQN-Offloading-algorithm/logs/*
-DDQN-Offloading-algorithm/output/1st_test_integration/runs/*
+DDQN-Offloading-algorithm/filtered.log
