@@ -67,7 +67,8 @@ class Config:
     REDIS_TASK_FIELDS    = ["mem_footprint_mb", "cpu_req_mcycles", "deadline_s", "qos"]
     REDIS_RSU_FIELDS     = ["cpu_available", "memory_available", "queue_length", "cpu_utilization"]
     REDIS_VEHICLE_FIELDS = ["cpu_available", "mem_available", "cpu_utilization",
-                            "mem_utilization", "queue_length", "speed", "heading", "distance_to_origin"]
+                            "mem_utilization", "queue_length", "speed", "heading",
+                            "acceleration", "distance_to_origin"]
     REDIS_NORMALIZATION  = {}
 
     HIDDEN_DIM    = 256

@@ -99,7 +99,9 @@ def _run_redis_instance(instance_cfg):
 
     # pending[task_id] = {state, actions, agent_decisions, task_request, timestamp}
     pending              = {}
+    late_baselines       = {}  # task_id -> {missing, entry, partial, timestamp}
     TIMEOUT              = Config.REDIS_RESULT_TIMEOUT  # seconds before discarding a pending task
+    LATE_BASELINE_TIMEOUT = 15.0  # seconds after DDQN arrives before baseline result is declared lost
     TRAIN_EVERY          = 4                            # batch-train after every N completions
     MAX_DRAIN_PER_CYCLE  = 20                           # max new tasks to ingest per poll cycle
     completions_since_train = 0
@@ -112,7 +114,7 @@ def _run_redis_instance(instance_cfg):
     # Vehicles send heartbeats every ~1s; we need at least one state before training.
     # Without this wait, every task is skipped (state=None) and the simulator stalls.
     _wait_start = time.time()
-    _MAX_STARTUP_WAIT = 40  # seconds
+    _MAX_STARTUP_WAIT = 15  # seconds
     print(f"[DRL-{iid}] Waiting for vehicle states in Redis (up to {_MAX_STARTUP_WAIT}s)...")
     while time.time() - _wait_start < _MAX_STARTUP_WAIT:
         keys = env.r.keys('vehicle:*:state')
@@ -187,9 +189,16 @@ def _run_redis_instance(instance_cfg):
 
             # done=True for every task-episode: next_state is unused in the target computation
             next_state = entry['state']
+            missing_baselines = []
 
             for agent_name in agent_names:
                 result = results_raw[agent_name]
+
+                # Baseline with TIMEOUT placeholder — park for late collection
+                if agent_name != 'ddqn' and result.get('fail_reason') == 'TIMEOUT':
+                    missing_baselines.append(agent_name)
+                    continue
+
                 dtype, tid = entry['agent_decisions'][agent_name]
                 reward, info = env.compute_reward_for(entry['task_request'], result, dtype, tid)
 
@@ -207,6 +216,15 @@ def _run_redis_instance(instance_cfg):
                         reward, next_state, done=True
                     )
 
+            # Park missing baselines for late collection
+            if missing_baselines:
+                late_baselines[task_id] = {
+                    'missing':   missing_baselines,
+                    'entry':     entry,
+                    'partial':   results_raw,
+                    'timestamp': time.time(),
+                }
+
             completions_since_train += 1
             episode += 1
 
@@ -222,9 +240,8 @@ def _run_redis_instance(instance_cfg):
                 writer.add_scalars("Decision_SV_Pct",      {a: _decision_pct(metrics[a]["decision_type"], "SERVICE_VEHICLE")   for a in active}, episode)
                 writer.add_scalars("Fail_Deadline_Rate",   {a: _fail_reason_pct(metrics[a]["fail_reason"], "DEADLINE_MISSED")  for a in active}, episode)
                 writer.add_scalars("Fail_Queue_Full_Rate", {a: _fail_reason_pct(metrics[a]["fail_reason"], "RSU_QUEUE_FULL")   for a in active}, episode)
-                writer.add_scalars("Fail_Routing_Rate",    {a: _fail_reason_pct(metrics[a]["fail_reason"], "SV_MAC_UNKNOWN") +
-                                                               _fail_reason_pct(metrics[a]["fail_reason"], "NEIGHBOR_RSU_UNKNOWN")
-                                                                                                                               for a in active}, episode)
+                writer.add_scalars("Fail_SV_OOR_Rate",     {a: _fail_reason_pct(metrics[a]["fail_reason"], "SV_OUT_OF_RANGE")  for a in active}, episode)
+                writer.add_scalars("Fail_Handover_Rate",   {a: _fail_reason_pct(metrics[a]["fail_reason"], "HANDOVER_FAIL")    for a in active}, episode)
                 writer.add_scalars("QoS_Success_Rate", {
                     f"{a}_qos1": _qos_success_pct(metrics[a]["qos"], metrics[a]["success"], 1)
                     for a in active
@@ -251,7 +268,42 @@ def _run_redis_instance(instance_cfg):
                     ddqn_agent.save_model(model_path)
                     print(f"  >> [DRL-{iid}] New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
 
-        # ── 3. Batch-train periodically (every TRAIN_EVERY completions) ──
+        # ── 3. Late-baseline collection: check Redis for baselines that arrived after DDQN ──
+        for lb_task_id in list(late_baselines.keys()):
+            lb = late_baselines[lb_task_id]
+            lb_entry = lb['entry']
+            still_missing = []
+
+            if time.time() - lb['timestamp'] > LATE_BASELINE_TIMEOUT:
+                # Give up — record remaining baselines as TIMEOUT
+                still_missing = lb['missing']
+            else:
+                arrived, still_missing = env.check_late_baselines(lb_task_id, lb['missing'])
+                for agent_name, result in arrived.items():
+                    dtype, tid = lb_entry['agent_decisions'][agent_name]
+                    reward, info = env.compute_reward_for(lb_entry['task_request'], result, dtype, tid)
+                    metrics[agent_name]["reward"].append(reward)
+                    metrics[agent_name]["success"].append(info['success'])
+                    metrics[agent_name]["latency"].append(info['latency'])
+                    metrics[agent_name]["energy"].append(info.get('energy', 0.0))
+                    metrics[agent_name]["decision_type"].append(info.get('decision_type', 'RSU'))
+                    metrics[agent_name]["fail_reason"].append(info.get('fail_reason', 'NONE'))
+                    metrics[agent_name]["qos"].append(lb_entry['task_request'].get('qos', 1.0))
+
+            # Record timed-out baselines with TIMEOUT reason
+            for agent_name in still_missing:
+                metrics[agent_name]["reward"].append(-1.0)
+                metrics[agent_name]["success"].append(False)
+                metrics[agent_name]["latency"].append(999.0)
+                metrics[agent_name]["energy"].append(0.0)
+                metrics[agent_name]["decision_type"].append('UNKNOWN')
+                metrics[agent_name]["fail_reason"].append('TIMEOUT')
+                metrics[agent_name]["qos"].append(lb_entry['task_request'].get('qos', 1.0))
+
+            if not still_missing or time.time() - lb['timestamp'] > LATE_BASELINE_TIMEOUT:
+                late_baselines.pop(lb_task_id)
+
+        # ── 4. Batch-train periodically (every TRAIN_EVERY completions) ──
         if completions_since_train >= TRAIN_EVERY:
             loss = ddqn_agent.train()
             ddqn_agent.update_target_network_soft()

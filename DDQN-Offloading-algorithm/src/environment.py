@@ -391,6 +391,7 @@ class IoVRedisEnv:
             'processing_count': int(float(data.get('processing_count', 0))),
             'speed':            float(data.get('speed', 0)),
             'heading':          float(data.get('heading', 0)),
+            'acceleration':     float(data.get('acceleration', 0)),
             'pos_x':            float(data.get('pos_x', 0)),
             'pos_y':            float(data.get('pos_y', 0)),
             'sinr':             float(data.get('sinr', 0)),  # populated by simulator in future
@@ -766,6 +767,28 @@ class IoVRedisEnv:
             }
             for agent in agent_names
         }
+
+    def check_late_baselines(self, task_id, missing_agents):
+        """
+        Poll Redis for specific missing baseline agents.
+        Returns (arrived_dict, still_missing_list).
+        arrived_dict: {agent_name: result_dict} for agents that have now reported.
+        """
+        data = self.r.hgetall(f"task:{task_id}:results")
+        arrived, still_missing = {}, []
+        for agent in missing_agents:
+            if f'{agent}_status' in data:
+                arrived[agent] = {
+                    'status':        data[f'{agent}_status'],
+                    'total_latency': float(data.get(f'{agent}_latency', 999)),
+                    'energy':        float(data.get(f'{agent}_energy', 0.0)),
+                    'fail_reason':   data.get(f'{agent}_reason',
+                                              'NONE' if data[f'{agent}_status'] == 'COMPLETED_ON_TIME'
+                                              else 'UNKNOWN'),
+                }
+            else:
+                still_missing.append(agent)
+        return arrived, still_missing
 
     def compute_reward_for(self, task_request, result, decision_type, target_id):
         """
