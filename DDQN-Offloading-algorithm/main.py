@@ -170,26 +170,23 @@ def _run_redis_instance(instance_cfg):
                   f"({len(pending)} pending, ep={episode})")
 
         # ── 2. Check ALL pending tasks for results (non-blocking) ──
+        # Expire timed-out entries first
+        _now = time.time()
         for task_id in list(pending.keys()):
-            entry = pending[task_id]
-
-            # Discard timed-out entries
-            if time.time() - entry['timestamp'] > TIMEOUT:
+            if _now - pending[task_id]['timestamp'] > TIMEOUT:
                 print(f"[DRL-{iid}] Task {task_id} timed out — discarding")
                 pending.pop(task_id)
                 timeout_count += 1
-                continue
 
-            agent_names = list(entry['actions'].keys())
-            results_raw = env.check_results_nonblocking(task_id, agent_names)
-            if results_raw is None:
-                continue  # not ready yet — check again next cycle
-
-            pending.pop(task_id)
+        # Batch-read all remaining result hashes in one pipeline round-trip
+        _batch = env.batch_check_results(pending)
+        for task_id, results_raw in _batch.items():
+            entry = pending.pop(task_id)
 
             # done=True for every task-episode: next_state is unused in the target computation
             next_state = entry['state']
             missing_baselines = []
+            agent_names = list(entry['actions'].keys())
 
             for agent_name in agent_names:
                 result = results_raw[agent_name]
@@ -257,41 +254,33 @@ def _run_redis_instance(instance_cfg):
             writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
             writer.add_scalar("Task_Timeout_Rate", timeout_count / max(episode, 1), episode)
 
-            if episode % 100 == 0:
+            if episode % 10 == 0:
+                import datetime
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
                 window = metrics["ddqn"]["reward"][-100:] if len(metrics["ddqn"]["reward"]) >= 100 \
                          else metrics["ddqn"]["reward"]
                 avg_ddqn = np.mean(window) if window else 0.0
-                print(f"[DRL-{iid}] Ep {episode:5d} | DDQN: {avg_ddqn:.2f} "
-                      f"| Eps: {ddqn_agent.epsilon:.3f} | Pending: {len(pending)}")
+                ok_counts = {a: sum(1 for s in metrics[a]["success"] if s > 0) for a in active}
+                print(f"[DRL-{iid}] [{ts}] Ep {episode:5d} | DDQN: {avg_ddqn:.2f} "
+                      f"| Eps: {ddqn_agent.epsilon:.3f} | Pending: {len(pending)} "
+                      f"| OK: {ok_counts}")
                 if avg_ddqn > best_avg_reward and episode > 1000:
                     best_avg_reward = avg_ddqn
                     ddqn_agent.save_model(model_path)
                     print(f"  >> [DRL-{iid}] New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
 
         # ── 3. Late-baseline collection: check Redis for baselines that arrived after DDQN ──
-        for lb_task_id in list(late_baselines.keys()):
-            lb = late_baselines[lb_task_id]
+        _now_lb = time.time()
+        # Split into expired (give up) and active (still polling)
+        _expired_lb = {tid: lb for tid, lb in late_baselines.items()
+                       if _now_lb - lb['timestamp'] > LATE_BASELINE_TIMEOUT}
+        _active_lb  = {tid: lb for tid, lb in late_baselines.items()
+                       if _now_lb - lb['timestamp'] <= LATE_BASELINE_TIMEOUT}
+
+        # Handle expired: record all remaining as TIMEOUT and remove
+        for lb_task_id, lb in _expired_lb.items():
             lb_entry = lb['entry']
-            still_missing = []
-
-            if time.time() - lb['timestamp'] > LATE_BASELINE_TIMEOUT:
-                # Give up — record remaining baselines as TIMEOUT
-                still_missing = lb['missing']
-            else:
-                arrived, still_missing = env.check_late_baselines(lb_task_id, lb['missing'])
-                for agent_name, result in arrived.items():
-                    dtype, tid = lb_entry['agent_decisions'][agent_name]
-                    reward, info = env.compute_reward_for(lb_entry['task_request'], result, dtype, tid)
-                    metrics[agent_name]["reward"].append(reward)
-                    metrics[agent_name]["success"].append(info['success'])
-                    metrics[agent_name]["latency"].append(info['latency'])
-                    metrics[agent_name]["energy"].append(info.get('energy', 0.0))
-                    metrics[agent_name]["decision_type"].append(info.get('decision_type', 'RSU'))
-                    metrics[agent_name]["fail_reason"].append(info.get('fail_reason', 'NONE'))
-                    metrics[agent_name]["qos"].append(lb_entry['task_request'].get('qos', 1.0))
-
-            # Record timed-out baselines with TIMEOUT reason
-            for agent_name in still_missing:
+            for agent_name in lb['missing']:
                 metrics[agent_name]["reward"].append(-1.0)
                 metrics[agent_name]["success"].append(False)
                 metrics[agent_name]["latency"].append(999.0)
@@ -299,8 +288,27 @@ def _run_redis_instance(instance_cfg):
                 metrics[agent_name]["decision_type"].append('UNKNOWN')
                 metrics[agent_name]["fail_reason"].append('TIMEOUT')
                 metrics[agent_name]["qos"].append(lb_entry['task_request'].get('qos', 1.0))
+            late_baselines.pop(lb_task_id)
 
-            if not still_missing or time.time() - lb['timestamp'] > LATE_BASELINE_TIMEOUT:
+        # Batch-read active late-baseline result hashes in one pipeline round-trip
+        _batch_lb = env.batch_check_late_baselines(_active_lb)
+        for lb_task_id, (arrived, still_missing) in _batch_lb.items():
+            lb = late_baselines[lb_task_id]
+            lb_entry = lb['entry']
+            for agent_name, result in arrived.items():
+                dtype, tid = lb_entry['agent_decisions'][agent_name]
+                reward, info = env.compute_reward_for(lb_entry['task_request'], result, dtype, tid)
+                metrics[agent_name]["reward"].append(reward)
+                metrics[agent_name]["success"].append(info['success'])
+                metrics[agent_name]["latency"].append(info['latency'])
+                metrics[agent_name]["energy"].append(info.get('energy', 0.0))
+                metrics[agent_name]["decision_type"].append(info.get('decision_type', 'RSU'))
+                metrics[agent_name]["fail_reason"].append(info.get('fail_reason', 'NONE'))
+                metrics[agent_name]["qos"].append(lb_entry['task_request'].get('qos', 1.0))
+            # Update missing list for next cycle; remove if fully resolved
+            if still_missing:
+                late_baselines[lb_task_id]['missing'] = still_missing
+            else:
                 late_baselines.pop(lb_task_id)
 
         # ── 4. Batch-train periodically (every TRAIN_EVERY completions) ──
@@ -483,9 +491,11 @@ def run():
         if loss is not None:
             writer.add_scalar("Loss", loss, episode)
 
-        if episode % 100 == 0:
+        if episode % 10 == 0:
+            import datetime
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
             avg_ddqn = np.mean(metrics["ddqn"]["reward"][-100:])
-            print(f"Ep {episode} | DDQN: {avg_ddqn:.2f} | Eps: {ddqn_agent.epsilon:.2f}")
+            print(f"[{ts}] Ep {episode} | DDQN: {avg_ddqn:.2f} | Eps: {ddqn_agent.epsilon:.2f}")
             if avg_ddqn > best_avg_reward and episode > 1000:
                 best_avg_reward = avg_ddqn
                 ddqn_agent.save_model(Config.MODEL_SAVE_PATH)

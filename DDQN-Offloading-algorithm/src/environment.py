@@ -790,6 +790,71 @@ class IoVRedisEnv:
                 still_missing.append(agent)
         return arrived, still_missing
 
+    def batch_check_results(self, pending_dict):
+        """
+        Batch poll Redis for all pending tasks in a single pipeline round-trip.
+        Returns a dict: {task_id: results_raw} for tasks whose ddqn_status has arrived.
+        Tasks not yet ready are omitted from the returned dict.
+        pending_dict: {task_id: entry} where entry has 'actions' key.
+        """
+        task_ids = list(pending_dict.keys())
+        if not task_ids:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for task_id in task_ids:
+            pipe.hgetall(f"task:{task_id}:results")
+        all_data = pipe.execute()  # single network round-trip
+
+        ready = {}
+        for task_id, data in zip(task_ids, all_data):
+            if not data or 'ddqn_status' not in data:
+                continue
+            agent_names = list(pending_dict[task_id]['actions'].keys())
+            ready[task_id] = {
+                agent: {
+                    'status':        data.get(f'{agent}_status', 'FAILED'),
+                    'total_latency': float(data.get(f'{agent}_latency', 999)),
+                    'energy':        float(data.get(f'{agent}_energy',  0.0)),
+                    'fail_reason':   data.get(f'{agent}_reason',
+                                              'TIMEOUT' if f'{agent}_status' not in data else 'UNKNOWN'),
+                }
+                for agent in agent_names
+            }
+        return ready
+
+    def batch_check_late_baselines(self, late_baselines_dict):
+        """
+        Batch poll Redis for late-arriving baselines in a single pipeline round-trip.
+        Returns {task_id: (arrived_dict, still_missing_list)}.
+        late_baselines_dict: {task_id: {'missing': [...], ...}}
+        """
+        task_ids = list(late_baselines_dict.keys())
+        if not task_ids:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for task_id in task_ids:
+            pipe.hgetall(f"task:{task_id}:results")
+        all_data = pipe.execute()
+
+        results = {}
+        for task_id, data in zip(task_ids, all_data):
+            missing_agents = late_baselines_dict[task_id]['missing']
+            arrived, still_missing = {}, []
+            for agent in missing_agents:
+                if data and f'{agent}_status' in data:
+                    arrived[agent] = {
+                        'status':        data[f'{agent}_status'],
+                        'total_latency': float(data.get(f'{agent}_latency', 999)),
+                        'energy':        float(data.get(f'{agent}_energy', 0.0)),
+                        'fail_reason':   data.get(f'{agent}_reason',
+                                                  'NONE' if data[f'{agent}_status'] == 'COMPLETED_ON_TIME'
+                                                  else 'UNKNOWN'),
+                    }
+                else:
+                    still_missing.append(agent)
+            results[task_id] = (arrived, still_missing)
+        return results
+
     def compute_reward_for(self, task_request, result, decision_type, target_id):
         """
         Standalone reward calculation given a stored task_request dict and an agent's result.
