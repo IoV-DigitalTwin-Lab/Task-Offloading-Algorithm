@@ -5,16 +5,31 @@ import random
 import argparse
 import threading
 import time
+import json
+import datetime
+from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 
 from src.environment import IoVDummyEnv, IoVRedisEnv
 from src.agent import DDQNAgent
-from src.baselines import RandomAgent, GreedyComputeAgent, MinLatencyAgent, LeastQueueAgent, GreedyDistanceAgent
+from src.agents import (
+    RandomAgent, GreedyComputeAgent, MinLatencyAgent,
+    LeastQueueAgent, GreedyDistanceAgent, LocalAgent,
+)
 from src.config import Config
 
-# Agent names used in both redis and dummy training loops
-REDIS_AGENTS  = ['ddqn', 'random', 'greedy_comp', 'min_latency', 'least_queue']
-DUMMY_AGENTS  = ['ddqn', 'random', 'greedy_comp', 'greedy_dist']
+# Dummy-env agent names (unchanged)
+DUMMY_AGENTS = ['ddqn', 'random', 'greedy_comp', 'greedy_dist']
+
+# 6 canonical task types from the simulator taxonomy
+TASK_TYPES = [
+    "LOCAL_OBJECT_DETECTION",
+    "COOPERATIVE_PERCEPTION",
+    "ROUTE_OPTIMIZATION",
+    "FLEET_TRAFFIC_FORECAST",
+    "VOICE_COMMAND_PROCESSING",
+    "SENSOR_HEALTH_CHECK",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -22,13 +37,11 @@ DUMMY_AGENTS  = ['ddqn', 'random', 'greedy_comp', 'greedy_dist']
 # ---------------------------------------------------------------------------
 
 def _running_mean(data, window=100):
-    """Running mean over the most recent `window` entries."""
     window_data = data[-window:] if len(data) >= window else data
     return float(np.mean(window_data)) if window_data else 0.0
 
 
 def _decision_pct(decisions, dtype, window=50):
-    """Fraction of decisions matching `dtype` over the most recent `window` entries."""
     recent = decisions[-window:] if len(decisions) >= window else decisions
     if not recent:
         return 0.0
@@ -36,7 +49,6 @@ def _decision_pct(decisions, dtype, window=50):
 
 
 def _action_to_dtype(action):
-    """Map a dummy-env action index to a decision-type string."""
     if action == Config.MAX_NEIGHBORS:
         return "RSU"
     elif action < Config.MAX_NEIGHBORS:
@@ -45,7 +57,6 @@ def _action_to_dtype(action):
 
 
 def _fail_reason_pct(reasons, target_reason, window=50):
-    """Fraction of entries matching target_reason in the most recent `window` entries."""
     recent = reasons[-window:] if len(reasons) >= window else reasons
     if not recent:
         return 0.0
@@ -53,309 +64,457 @@ def _fail_reason_pct(reasons, target_reason, window=50):
 
 
 def _qos_success_pct(qos_list, success_list, target_qos, window=100):
-    """Success rate for a specific QoS level (1, 2, or 3) over recent `window` entries."""
     recent = list(zip(qos_list, success_list))[-window:]
     filtered = [s for q, s in recent if int(round(q)) == target_qos]
     return (sum(filtered) / len(filtered)) if filtered else 0.0
 
 
-def _run_redis_instance(instance_cfg):
+def _success_rate(successes, window=100):
+    """Rolling success rate as percentage (0-100)."""
+    recent = successes[-window:] if len(successes) >= window else successes
+    if not recent:
+        return 0.0
+    return sum(recent) / len(recent) * 100.0
+
+
+def _rolling_mean(data, key, window=50):
+    """Rolling mean of the last `window` entries from a list of dicts."""
+    recent = [d[key] for d in data[-window:]] if len(data) >= window else [d[key] for d in data]
+    return float(np.mean(recent)) if recent else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Agent factory
+# ---------------------------------------------------------------------------
+
+def _create_agent(agent_name):
+    if agent_name == 'ddqn':
+        return DDQNAgent()
+    elif agent_name == 'random':
+        return RandomAgent()
+    elif agent_name == 'greedy_compute':
+        return GreedyComputeAgent()
+    elif agent_name == 'min_latency':
+        return MinLatencyAgent()
+    elif agent_name == 'least_queue':
+        return LeastQueueAgent()
+    elif agent_name == 'greedy_distance':
+        return GreedyDistanceAgent()
+    elif agent_name == 'local':
+        return LocalAgent()
+    else:
+        raise ValueError(f"Unknown agent: {agent_name}")
+
+
+def _select_action(agent, agent_name, state, mask, env, request):
+    """Dispatch select_action for different agent interfaces."""
+    if agent_name == 'ddqn':
+        return agent.select_action(state, mask=mask)
+    elif agent_name == 'random':
+        return agent.select_action(mask)
+    elif agent_name == 'min_latency':
+        return agent.select_action(env.candidates, env.rsus, mask, task_info=request)
+    else:  # greedy_compute, least_queue, greedy_distance
+        return agent.select_action(env.candidates, env.rsus, mask)
+
+
+# ---------------------------------------------------------------------------
+# Single-agent Redis training loop
+# ---------------------------------------------------------------------------
+
+def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
     """
-    Async training loop for one RSU's DRL instance.
+    Single-agent training/evaluation loop for one RSU instance.
 
-    Design:
-      - Accept a task → infer all agents → write decisions → add to pending_dict
-      - On every poll cycle, check ALL pending tasks for results (non-blocking)
-      - When results arrive, compute reward and add to replay buffer
-      - Batch-train periodically regardless of pending state
+    Offload flow (all agents except 'local'):
+      1. Drain offloading_requests:queue (non-blocking, up to MAX_DRAIN_PER_CYCLE)
+      2. For each request: build state → agent selects action → write_decision
+      3. Batch-check task:{id}:result for all pending tasks
+      4. Drain local_results:queue (heuristic/allLocal modes)
+      5. Train DDQN every TRAIN_EVERY completions
+      6. Log to TensorBoard; save JSON results on completion
 
-    This avoids blocking on each task's result before processing the next one,
-    increasing throughput from ~0.5 tasks/s (serial) to many tasks in parallel.
-    Result ordering does not affect training quality because DDQN uses a replay buffer
-    (each (s, a, r, s') tuple is stored and sampled independently).
+    For 'local' agent: skip steps 1-3, only drain local_results:queue.
     """
     iid      = instance_cfg['instance_id']
     redis_db = instance_cfg['redis_db']
     rsu_id   = instance_cfg['rsu_id']
 
-    log_dir    = os.path.join(Config.LOG_DIR, f"instance_{iid}")
+    log_dir    = os.path.join(Config.LOG_DIR, f"{agent_name}_{offload_mode}", f"instance_{iid}")
     model_path = os.path.join(Config.BASE_DIR, "models", f"ddqn_rsu{iid}.pth")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    os.makedirs(os.path.join(Config.BASE_DIR, "results"), exist_ok=True)
 
     writer = SummaryWriter(log_dir=log_dir)
     env    = IoVRedisEnv(redis_db=redis_db, instance_id=iid)
+    agent  = _create_agent(agent_name)
 
-    ddqn_agent        = DDQNAgent()
-    random_agent      = RandomAgent()
-    greedy_comp_agent = GreedyComputeAgent()
-    min_latency_agent = MinLatencyAgent()
-    least_queue_agent = LeastQueueAgent()
+    # DDQN-specific reference (None for baselines)
+    ddqn_agent = agent if agent_name == 'ddqn' else None
 
-    metrics         = {a: {"reward": [], "success": [], "latency": [], "energy": [],
-                           "decision_type": [], "fail_reason": [], "qos": []}
-                       for a in REDIS_AGENTS}
-    best_avg_reward = -float('inf')
+    TIMEOUT             = Config.REDIS_RESULT_TIMEOUT
+    TRAIN_EVERY         = 4
+    MAX_DRAIN_PER_CYCLE = 20
 
-    # pending[task_id] = {state, actions, agent_decisions, task_request, timestamp}
-    pending              = {}
-    late_baselines       = {}  # task_id -> {missing, entry, partial, timestamp}
-    TIMEOUT              = Config.REDIS_RESULT_TIMEOUT  # seconds before discarding a pending task
-    LATE_BASELINE_TIMEOUT = 15.0  # seconds after DDQN arrives before baseline result is declared lost
-    TRAIN_EVERY          = 4                            # batch-train after every N completions
-    MAX_DRAIN_PER_CYCLE  = 20                           # max new tasks to ingest per poll cycle
+    # ── Accumulators ─────────────────────────────────────────────────────────
+    # Per-task-type rolling data (all tasks combined)
+    lat_by_type  = defaultdict(list)   # task_type → [latency, ...]
+    ene_by_type  = defaultdict(list)   # task_type → [energy, ...]
+
+    offload_rewards   = []   # only for ddqn
+    offload_successes = []
+    local_successes   = []
+    all_successes     = []   # combined; used for Success_Rate
+
+    decision_types    = []   # "RSU" | "SERVICE_VEHICLE"
+    all_fail_reasons  = []   # raw reason strings
+    qos_values        = []   # raw qos floats (for QoS_Success_Rate)
+    qos_successes     = []   # bool, aligned with qos_values
+
+    fail_counts = defaultdict(int)  # cumulative; used in JSON results
+
+    pending            = {}   # task_id → {state, action, decision_type, target, task_request, task_type, timestamp}
+    episode            = 0    # total tasks processed
     completions_since_train = 0
-    timeout_count        = 0
-    episode              = 0
+    timeout_count      = 0
+    total_tasks        = 0
+    offload_tasks      = 0
+    local_tasks        = 0
 
-    print(f"[DRL-{iid}] Starting ASYNC training for {rsu_id} on Redis DB {redis_db} ...")
+    print(f"[{agent_name}-{iid}] Starting | mode={offload_mode} | RSU={rsu_id} | DB={redis_db}")
 
-    # ── Startup: wait until vehicle state keys appear in Redis ──────────────
-    # Vehicles send heartbeats every ~1s; we need at least one state before training.
-    # Without this wait, every task is skipped (state=None) and the simulator stalls.
-    _wait_start = time.time()
-    _MAX_STARTUP_WAIT = 15  # seconds
-    print(f"[DRL-{iid}] Waiting for vehicle states in Redis (up to {_MAX_STARTUP_WAIT}s)...")
-    while time.time() - _wait_start < _MAX_STARTUP_WAIT:
-        keys = env.r.keys('vehicle:*:state')
-        if keys:
-            print(f"[DRL-{iid}] Found {len(keys)} vehicle state(s). Starting training loop.")
-            break
-        time.sleep(1.0)
-    else:
-        print(f"[DRL-{iid}] WARNING: no vehicle states after {_MAX_STARTUP_WAIT}s — starting anyway.")
+    # ── Wait for vehicle states ───────────────────────────────────────────────
+    if agent_name != 'local':
+        _wait_start = time.time()
+        _MAX_WAIT = 15
+        print(f"[{agent_name}-{iid}] Waiting for vehicle states (up to {_MAX_WAIT}s)...")
+        while time.time() - _wait_start < _MAX_WAIT:
+            if env.r.keys('vehicle:*:state'):
+                print(f"[{agent_name}-{iid}] Vehicle states found. Starting loop.")
+                break
+            time.sleep(1.0)
+        else:
+            print(f"[{agent_name}-{iid}] WARNING: no vehicle states — starting anyway.")
 
-    while episode < Config.EPISODS:
+    try:
+        while True:
 
-        # ── 1. Drain incoming tasks (non-blocking, up to MAX_DRAIN_PER_CYCLE) ──
-        for _ in range(MAX_DRAIN_PER_CYCLE):
-            request = env._poll_request_nonblocking()
-            if request is None:
-                break  # queue empty
+            # ── 1. Drain offloading requests ──────────────────────────────────
+            if agent_name != 'local':
+                for _ in range(MAX_DRAIN_PER_CYCLE):
+                    request = env._poll_request_nonblocking()
+                    if request is None:
+                        break
 
-            state = env.setup_from_request(request)
-            if state is None:
-                # Vehicle state still unavailable — write fallback RSU decision so the
-                # simulator is not left waiting indefinitely for a decision that never arrives.
-                pipe = env.r.pipeline()
-                fallback_map = {'agents': ','.join(REDIS_AGENTS)}
-                for _a in REDIS_AGENTS:
-                    fallback_map[f'{_a}_type']   = 'RSU'
-                    fallback_map[f'{_a}_target'] = request.get('rsu_id', env.rsu_ids[0])
-                pipe.hset(f"task:{request['task_id']}:decisions", mapping=fallback_map)
-                pipe.expire(f"task:{request['task_id']}:decisions", 300)
-                pipe.execute()
-                print(f"[DRL-{iid}] Task {request['task_id']}: vehicle state missing — fallback RSU decision written")
-                continue
+                    state = env.setup_from_request(request)
+                    if state is None:
+                        # Vehicle state missing: write fallback RSU-0 decision
+                        env.write_decision(request['task_id'], 0, agent_name)
+                        print(f"[{agent_name}-{iid}] Task {request['task_id']}: "
+                              f"vehicle state missing — fallback RSU decision")
+                        continue
 
-            mask = env.get_action_mask()
-            actions = {
-                'ddqn':        ddqn_agent.select_action(state, mask=mask),
-                'random':      random_agent.select_action(mask),
-                'greedy_comp': greedy_comp_agent.select_action(env.candidates, env.rsus, mask),
-                'min_latency': min_latency_agent.select_action(
-                                   env.candidates, env.rsus, mask, task_info=request),
-                'least_queue': least_queue_agent.select_action(env.candidates, env.rsus, mask),
-            }
+                    mask   = env.get_action_mask()
+                    action = _select_action(agent, agent_name, state, mask, env, request)
+                    dec    = env.write_decision(request['task_id'], action, agent_name)
+                    task_type = getattr(env, 'task_type', 'UNKNOWN')
 
-            agent_decisions = env.write_decisions(request['task_id'], actions)
-            pending[request['task_id']] = {
-                'state':           state,
-                'actions':         actions,
-                'agent_decisions': agent_decisions,
-                'task_request':    request,
-                'timestamp':       time.time(),
-            }
-            print(f"[DRL-{iid}] Task {request['task_id']} dispatched "
-                  f"({len(pending)} pending, ep={episode})")
+                    pending[request['task_id']] = {
+                        'state':         state,
+                        'action':        action,
+                        'decision_type': dec['type'],
+                        'target':        dec['target'],
+                        'task_request':  request,
+                        'task_type':     task_type,
+                        'timestamp':     time.time(),
+                    }
 
-        # ── 2. Check ALL pending tasks for results (non-blocking) ──
-        # Expire timed-out entries first
-        _now = time.time()
-        for task_id in list(pending.keys()):
-            if _now - pending[task_id]['timestamp'] > TIMEOUT:
-                print(f"[DRL-{iid}] Task {task_id} timed out — discarding")
-                pending.pop(task_id)
-                timeout_count += 1
+            # ── 2. Expire timed-out pending entries ───────────────────────────
+            _now = time.time()
+            for tid in list(pending.keys()):
+                if _now - pending[tid]['timestamp'] > TIMEOUT:
+                    pending.pop(tid)
+                    timeout_count += 1
 
-        # Batch-read all remaining result hashes in one pipeline round-trip
-        _batch = env.batch_check_results(pending)
-        for task_id, results_raw in _batch.items():
-            entry = pending.pop(task_id)
+            # ── 3. Batch-check offloaded results ──────────────────────────────
+            ready = env.batch_check_single_results(pending)
+            for task_id, result in ready.items():
+                entry   = pending.pop(task_id)
+                success = result['status'] == 'COMPLETED_ON_TIME'
+                latency = result['latency']
+                energy  = result['energy']
+                reason  = result.get('reason', 'NONE')
+                ttype   = entry['task_type']
+                qos     = float(entry['task_request'].get('qos', 1.0))
 
-            # done=True for every task-episode: next_state is unused in the target computation
-            next_state = entry['state']
-            missing_baselines = []
-            agent_names = list(entry['actions'].keys())
+                lat_by_type[ttype].append(latency)
+                ene_by_type[ttype].append(energy)
+                offload_successes.append(1 if success else 0)
+                all_successes.append(1 if success else 0)
+                decision_types.append(entry['decision_type'])
+                all_fail_reasons.append(reason)
+                fail_counts[reason] += 1
+                qos_values.append(qos)
+                qos_successes.append(1 if success else 0)
 
-            for agent_name in agent_names:
-                result = results_raw[agent_name]
+                offload_tasks += 1
+                total_tasks   += 1
+                episode       += 1
+                completions_since_train += 1
 
-                # Baseline with TIMEOUT placeholder — park for late collection
-                if agent_name != 'ddqn' and result.get('fail_reason') == 'TIMEOUT':
-                    missing_baselines.append(agent_name)
-                    continue
-
-                dtype, tid = entry['agent_decisions'][agent_name]
-                reward, info = env.compute_reward_for(entry['task_request'], result, dtype, tid)
-
-                metrics[agent_name]["reward"].append(reward)
-                metrics[agent_name]["success"].append(info['success'])
-                metrics[agent_name]["latency"].append(info['latency'])
-                metrics[agent_name]["energy"].append(info.get('energy', 0.0))
-                metrics[agent_name]["decision_type"].append(info.get('decision_type', 'RSU'))
-                metrics[agent_name]["fail_reason"].append(info.get('fail_reason', 'NONE'))
-                metrics[agent_name]["qos"].append(entry['task_request'].get('qos', 1.0))
-
-                if agent_name == 'ddqn':
+                if ddqn_agent is not None:
+                    reward, _ = env.compute_reward_for(
+                        entry['task_request'], result, entry['decision_type'], entry['target']
+                    )
+                    offload_rewards.append(reward)
                     ddqn_agent.store_transition(
-                        entry['state'], entry['actions']['ddqn'],
-                        reward, next_state, done=True
+                        entry['state'], entry['action'], reward, entry['state'], done=True
                     )
 
-            # Park missing baselines for late collection
-            if missing_baselines:
-                late_baselines[task_id] = {
-                    'missing':   missing_baselines,
-                    'entry':     entry,
-                    'partial':   results_raw,
-                    'timestamp': time.time(),
-                }
+                # TensorBoard (offloaded tasks drive the episode counter)
+                _log_episode(writer, episode, success, latency, energy, reason,
+                             entry['decision_type'], ttype, qos,
+                             all_successes, lat_by_type, ene_by_type,
+                             offload_successes, local_successes,
+                             decision_types, all_fail_reasons, qos_values, qos_successes,
+                             offload_rewards, timeout_count, total_tasks,
+                             agent_name, ddqn_agent)
 
-            completions_since_train += 1
-            episode += 1
+            # ── 4. Drain local results ────────────────────────────────────────
+            _local_drained = 0
+            for _ in range(MAX_DRAIN_PER_CYCLE):
+                local = env.poll_local_result()
+                if local is None:
+                    break
+                task_id, result = local
+                if not result:
+                    continue
+                ttype   = result.get('task_type', 'UNKNOWN')
+                success = result.get('status', 'FAILED') == 'COMPLETED_ON_TIME'
+                latency = result.get('latency', 999.0)
+                energy  = result.get('energy',  0.0)
+                reason  = result.get('reason',  'NONE')
+                qos     = float(result.get('qos_value', 1.0))
 
-            # TensorBoard — log only agents that have at least one data point
-            active = [a for a in REDIS_AGENTS if metrics[a]["reward"]]
-            if active:
-                writer.add_scalars("Rewards",              {a: metrics[a]["reward"][-1]                                        for a in active}, episode)
-                writer.add_scalars("Rewards_Smoothed",     {a: _running_mean(metrics[a]["reward"])                             for a in active}, episode)
-                writer.add_scalars("Success_Rate",         {a: metrics[a]["success"][-1]                                       for a in active}, episode)
-                writer.add_scalars("Latency",              {a: metrics[a]["latency"][-1]                                       for a in active}, episode)
-                writer.add_scalars("Energy",               {a: metrics[a]["energy"][-1]                                        for a in active}, episode)
-                writer.add_scalars("Decision_RSU_Pct",     {a: _decision_pct(metrics[a]["decision_type"], "RSU")               for a in active}, episode)
-                writer.add_scalars("Decision_SV_Pct",      {a: _decision_pct(metrics[a]["decision_type"], "SERVICE_VEHICLE")   for a in active}, episode)
-                writer.add_scalars("Fail_Deadline_Rate",   {a: _fail_reason_pct(metrics[a]["fail_reason"], "DEADLINE_MISSED")  for a in active}, episode)
-                writer.add_scalars("Fail_Queue_Full_Rate", {a: _fail_reason_pct(metrics[a]["fail_reason"], "RSU_QUEUE_FULL")   for a in active}, episode)
-                writer.add_scalars("Fail_SV_OOR_Rate",     {a: _fail_reason_pct(metrics[a]["fail_reason"], "SV_OUT_OF_RANGE")  for a in active}, episode)
-                writer.add_scalars("Fail_Handover_Rate",   {a: _fail_reason_pct(metrics[a]["fail_reason"], "HANDOVER_FAIL")    for a in active}, episode)
-                writer.add_scalars("QoS_Success_Rate", {
-                    f"{a}_qos1": _qos_success_pct(metrics[a]["qos"], metrics[a]["success"], 1)
-                    for a in active
-                }, episode)
-                writer.add_scalars("QoS_Success_Rate", {
-                    f"{a}_qos2": _qos_success_pct(metrics[a]["qos"], metrics[a]["success"], 2)
-                    for a in active
-                }, episode)
-                writer.add_scalars("QoS_Success_Rate", {
-                    f"{a}_qos3": _qos_success_pct(metrics[a]["qos"], metrics[a]["success"], 3)
-                    for a in active
-                }, episode)
-            writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
-            writer.add_scalar("Task_Timeout_Rate", timeout_count / max(episode, 1), episode)
+                lat_by_type[ttype].append(latency)
+                ene_by_type[ttype].append(energy)
+                local_successes.append(1 if success else 0)
+                all_successes.append(1 if success else 0)
+                all_fail_reasons.append(reason)
+                fail_counts[reason] += 1
+                qos_values.append(qos)
+                qos_successes.append(1 if success else 0)
 
-            if episode % 10 == 0:
-                import datetime
+                local_tasks  += 1
+                total_tasks  += 1
+                _local_drained += 1
+
+                # For local-only agent: TensorBoard updates driven by local completions
+                if agent_name == 'local':
+                    episode += 1
+                    _log_episode(writer, episode, success, latency, energy, reason,
+                                 'LOCAL', ttype, qos,
+                                 all_successes, lat_by_type, ene_by_type,
+                                 offload_successes, local_successes,
+                                 decision_types, all_fail_reasons, qos_values, qos_successes,
+                                 offload_rewards, timeout_count, total_tasks,
+                                 agent_name, ddqn_agent)
+
+            # ── 5. Train DDQN ─────────────────────────────────────────────────
+            if ddqn_agent is not None and completions_since_train >= TRAIN_EVERY:
+                loss = ddqn_agent.train()
+                ddqn_agent.update_target_network_soft()
+                if loss is not None:
+                    writer.add_scalar("Loss", loss, episode)
+                completions_since_train = 0
+
+            # ── 6. Periodic console log + model save ──────────────────────────
+            if episode > 0 and episode % 50 == 0:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
-                window = metrics["ddqn"]["reward"][-100:] if len(metrics["ddqn"]["reward"]) >= 100 \
-                         else metrics["ddqn"]["reward"]
-                avg_ddqn = np.mean(window) if window else 0.0
-                ok_counts = {a: sum(1 for s in metrics[a]["success"] if s > 0) for a in active}
-                print(f"[DRL-{iid}] [{ts}] Ep {episode:5d} | DDQN: {avg_ddqn:.2f} "
-                      f"| Eps: {ddqn_agent.epsilon:.3f} | Pending: {len(pending)} "
-                      f"| OK: {ok_counts}")
-                if avg_ddqn > best_avg_reward and episode > 1000:
-                    best_avg_reward = avg_ddqn
+                sr = _success_rate(all_successes)
+                print(f"[{agent_name}-{iid}] [{ts}] ep={episode} | "
+                      f"SR={sr:.1f}% | offload={offload_tasks} local={local_tasks} "
+                      f"pending={len(pending)} timeout={timeout_count}")
+                if ddqn_agent is not None and offload_rewards and episode > 500:
+                    avg_r = _running_mean(offload_rewards)
                     ddqn_agent.save_model(model_path)
-                    print(f"  >> [DRL-{iid}] New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
+                    print(f"  >> [{agent_name}-{iid}] Model saved | avg_reward={avg_r:.3f}")
 
-        # ── 3. Late-baseline collection: check Redis for baselines that arrived after DDQN ──
-        _now_lb = time.time()
-        # Split into expired (give up) and active (still polling)
-        _expired_lb = {tid: lb for tid, lb in late_baselines.items()
-                       if _now_lb - lb['timestamp'] > LATE_BASELINE_TIMEOUT}
-        _active_lb  = {tid: lb for tid, lb in late_baselines.items()
-                       if _now_lb - lb['timestamp'] <= LATE_BASELINE_TIMEOUT}
+            # ── Idle sleep ────────────────────────────────────────────────────
+            both_empty = (agent_name != 'local' and not pending and _local_drained == 0) or \
+                         (agent_name == 'local' and _local_drained == 0)
+            if both_empty:
+                time.sleep(Config.REDIS_POLL_INTERVAL)
 
-        # Handle expired: record all remaining as TIMEOUT and remove
-        for lb_task_id, lb in _expired_lb.items():
-            lb_entry = lb['entry']
-            for agent_name in lb['missing']:
-                metrics[agent_name]["reward"].append(-1.0)
-                metrics[agent_name]["success"].append(False)
-                metrics[agent_name]["latency"].append(999.0)
-                metrics[agent_name]["energy"].append(0.0)
-                metrics[agent_name]["decision_type"].append('UNKNOWN')
-                metrics[agent_name]["fail_reason"].append('TIMEOUT')
-                metrics[agent_name]["qos"].append(lb_entry['task_request'].get('qos', 1.0))
-            late_baselines.pop(lb_task_id)
+    except KeyboardInterrupt:
+        print(f"[{agent_name}-{iid}] Interrupted — saving results...")
 
-        # Batch-read active late-baseline result hashes in one pipeline round-trip
-        _batch_lb = env.batch_check_late_baselines(_active_lb)
-        for lb_task_id, (arrived, still_missing) in _batch_lb.items():
-            lb = late_baselines[lb_task_id]
-            lb_entry = lb['entry']
-            for agent_name, result in arrived.items():
-                dtype, tid = lb_entry['agent_decisions'][agent_name]
-                reward, info = env.compute_reward_for(lb_entry['task_request'], result, dtype, tid)
-                metrics[agent_name]["reward"].append(reward)
-                metrics[agent_name]["success"].append(info['success'])
-                metrics[agent_name]["latency"].append(info['latency'])
-                metrics[agent_name]["energy"].append(info.get('energy', 0.0))
-                metrics[agent_name]["decision_type"].append(info.get('decision_type', 'RSU'))
-                metrics[agent_name]["fail_reason"].append(info.get('fail_reason', 'NONE'))
-                metrics[agent_name]["qos"].append(lb_entry['task_request'].get('qos', 1.0))
-            # Update missing list for next cycle; remove if fully resolved
-            if still_missing:
-                late_baselines[lb_task_id]['missing'] = still_missing
-            else:
-                late_baselines.pop(lb_task_id)
+    # ── Save final model (ddqn) ───────────────────────────────────────────────
+    if ddqn_agent is not None and offload_rewards:
+        ddqn_agent.save_model(model_path)
+        print(f"[{agent_name}-{iid}] Final model saved to {model_path}")
 
-        # ── 4. Batch-train periodically (every TRAIN_EVERY completions) ──
-        if completions_since_train >= TRAIN_EVERY:
-            loss = ddqn_agent.train()
-            ddqn_agent.update_target_network_soft()
-            if loss is not None:
-                writer.add_scalar("Loss", loss, episode)
-            completions_since_train = 0
-
-        # Brief sleep when idle to avoid busy-wait CPU spin
-        if not pending:
-            time.sleep(Config.REDIS_POLL_INTERVAL)
+    # ── Save results JSON ─────────────────────────────────────────────────────
+    ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_path = os.path.join(
+        Config.BASE_DIR, "results",
+        f"{agent_name}_{offload_mode}_{ts_str}_inst{iid}.json"
+    )
+    results = {
+        "agent":        agent_name,
+        "offload_mode": offload_mode,
+        "rsu_id":       rsu_id,
+        "instance_id":  iid,
+        "timestamp":    datetime.datetime.now().isoformat(),
+        "metrics": {
+            "rewards":            offload_rewards,
+            "success_rates":      _build_rolling_series(all_successes, window=100,
+                                                        transform=lambda w: sum(w)/len(w)*100),
+            "latencies":          {t: lat_by_type[t] for t in TASK_TYPES},
+            "energies":           {t: ene_by_type[t] for t in TASK_TYPES},
+            "failure_reasons":    dict(fail_counts),
+            "qos_success_rates": {
+                f"qos{q}": _build_rolling_series(
+                    [(s if int(round(v)) == q else None)
+                     for v, s in zip(qos_values, qos_successes)],
+                    window=100, skip_none=True,
+                    transform=lambda w: sum(w)/len(w)*100
+                )
+                for q in (1, 2, 3)
+            },
+            "offload_success_rates": _build_rolling_series(offload_successes, window=100,
+                                                            transform=lambda w: sum(w)/len(w)*100),
+            "local_success_rates":   _build_rolling_series(local_successes, window=100,
+                                                            transform=lambda w: sum(w)/len(w)*100),
+            "total_tasks":   total_tasks,
+            "offload_tasks": offload_tasks,
+            "local_tasks":   local_tasks,
+        }
+    }
+    with open(result_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"[{agent_name}-{iid}] Results saved to {result_path}")
 
     writer.close()
-    print(f"[DRL-{iid}] Training Complete. Logs: {log_dir}  Model: {model_path}")
 
+
+def _build_rolling_series(data, window=100, transform=None, skip_none=False):
+    """Build a rolling-window series from a list."""
+    if skip_none:
+        data = [x for x in data if x is not None]
+    if not data or transform is None:
+        return []
+    series = []
+    for i in range(len(data)):
+        w = data[max(0, i - window + 1): i + 1]
+        series.append(transform(w))
+    return series
+
+
+def _log_episode(writer, episode, success, latency, energy, reason, decision_type, task_type,
+                 qos, all_successes, lat_by_type, ene_by_type,
+                 offload_successes, local_successes,
+                 decision_types, all_fail_reasons, qos_values, qos_successes,
+                 offload_rewards, timeout_count, total_tasks,
+                 agent_name, ddqn_agent):
+    """Log metrics to TensorBoard for a single completed task."""
+    writer.add_scalar("Success_Rate", _success_rate(all_successes), episode)
+
+    if offload_rewards:
+        writer.add_scalar("Rewards",         offload_rewards[-1],                episode)
+        writer.add_scalar("Rewards_Smoothed", _running_mean(offload_rewards),    episode)
+
+    # Per-task-type latency and energy (rolling mean per type)
+    for ttype in TASK_TYPES:
+        if lat_by_type[ttype]:
+            writer.add_scalar(f"Latency/{ttype}", _running_mean(lat_by_type[ttype], 50), episode)
+        if ene_by_type[ttype]:
+            writer.add_scalar(f"Energy/{ttype}",  _running_mean(ene_by_type[ttype], 50), episode)
+
+    # Decision distribution (offloaded tasks only)
+    if decision_types:
+        writer.add_scalar("Decision_RSU_Pct", _decision_pct(decision_types, "RSU"),              episode)
+        writer.add_scalar("Decision_SV_Pct",  _decision_pct(decision_types, "SERVICE_VEHICLE"),  episode)
+
+    # Fail reasons
+    writer.add_scalar("Fail_Deadline_Rate",   _fail_reason_pct(all_fail_reasons, "DEADLINE_MISSED"), episode)
+    writer.add_scalar("Fail_Queue_Full_Rate", _fail_reason_pct(all_fail_reasons, "RSU_QUEUE_FULL"),  episode)
+    writer.add_scalar("Fail_SV_OOR_Rate",     _fail_reason_pct(all_fail_reasons, "SV_OUT_OF_RANGE"), episode)
+    writer.add_scalar("Fail_Handover_Rate",   _fail_reason_pct(all_fail_reasons, "HANDOVER_FAIL"),   episode)
+
+    # QoS success rates
+    for q in (1, 2, 3):
+        filtered = [(s) for v, s in zip(qos_values, qos_successes) if int(round(v)) == q]
+        if filtered:
+            rate = sum(filtered[-100:]) / len(filtered[-100:]) * 100.0
+            writer.add_scalar(f"QoS_Success_Rate/qos{q}", rate, episode)
+
+    # DDQN-specific
+    if ddqn_agent is not None:
+        writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
+
+    # Task timeout rate (cumulative)
+    writer.add_scalar("Task_Timeout_Rate", timeout_count / max(total_tasks, 1), episode)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def run():
     parser = argparse.ArgumentParser(description="Train Task Offloading DRL Agent")
     parser.add_argument('--env', type=str, default='dummy', choices=['dummy', 'redis'],
                         help='Environment type: dummy or redis')
+    parser.add_argument('--agent', type=str, default=None,
+                        choices=['ddqn', 'random', 'greedy_compute', 'min_latency',
+                                 'least_queue', 'greedy_distance', 'local'],
+                        help='Agent type (required for --env redis)')
     args = parser.parse_args()
 
     if args.env == 'redis':
-        Config.load_config("redis_config.json")   # load FIRST so paths are correct
+        if args.agent is None:
+            print("[ERROR] --agent is required when using --env redis")
+            print("  choices: ddqn, random, greedy_compute, min_latency, "
+                  "least_queue, greedy_distance, local")
+            return
+
+        Config.load_config("redis_config.json")
         os.makedirs(Config.LOG_DIR, exist_ok=True)
-        print("Initializing Redis Environment(s) ...")
+        print(f"Initializing Redis Environment(s) for agent={args.agent} ...")
+
         active = [i for i in Config.DRL_INSTANCES if i['active']]
         if not active:
-            print("[ERROR] No active DRL instances in redis_config.json. Set at least one 'active': true.")
+            print("[ERROR] No active agent_instances in redis_config.json.")
             return
+
+        # Read offload_mode from Redis (written by simulator at startup)
+        import redis as _redis_lib
+        _r0 = _redis_lib.Redis(host=Config.REDIS_HOST, port=Config.REDIS_PORT,
+                               db=active[0]['redis_db'], decode_responses=True)
+        offload_mode = _r0.get("sim:offload_mode") or "unknown"
+        _r0.close()
+        print(f"Simulator offload mode: {offload_mode}")
+
         if len(active) == 1:
-            _run_redis_instance(active[0])
+            _run_single_agent_instance(active[0], args.agent, offload_mode)
         else:
             threads = [
-                threading.Thread(target=_run_redis_instance, args=(i,), daemon=True)
-                for i in active
+                threading.Thread(
+                    target=_run_single_agent_instance,
+                    args=(inst, args.agent, offload_mode),
+                    daemon=True
+                )
+                for inst in active
             ]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
-        print("All Redis DRL instances finished.")
+        print("All agent instances finished.")
         return
 
-    # --- Dummy path ---
+    # ── Dummy env path (unchanged) ────────────────────────────────────────────
     Config.load_config("dummy_config.json")
     os.makedirs(os.path.dirname(Config.MODEL_SAVE_PATH), exist_ok=True)
     os.makedirs(os.path.dirname(Config.PLOT_SAVE_PATH), exist_ok=True)
@@ -381,10 +540,9 @@ def run():
 
     for episode in range(episodes):
         seed = Config.SEED + episode
-
         random.seed(seed); np.random.seed(seed)
         state = env.reset(); mask = env.get_action_mask()
-        ep_qos = env.current_task.qos  # same for all agents (same seed)
+        ep_qos = env.current_task.qos
         action = ddqn_agent.select_action(state, mask=mask)
         next_state, reward, done, info = env.step(action)
         ddqn_agent.store_transition(state, action, reward, next_state, done)
@@ -457,42 +615,11 @@ def run():
             "Greedy_Comp": gc_info.get('energy', 0.0),
             "Greedy_Dist": gd_info.get('energy', 0.0),
         }, episode)
-        writer.add_scalars("Decision_RSU_Pct", {
-            "DDQN":        _decision_pct(metrics["ddqn"]["decision_type"],        "RSU"),
-            "Random":      _decision_pct(metrics["random"]["decision_type"],      "RSU"),
-            "Greedy_Comp": _decision_pct(metrics["greedy_comp"]["decision_type"], "RSU"),
-            "Greedy_Dist": _decision_pct(metrics["greedy_dist"]["decision_type"], "RSU"),
-        }, episode)
-        writer.add_scalars("Decision_SV_Pct", {
-            "DDQN":        _decision_pct(metrics["ddqn"]["decision_type"],        "SERVICE_VEHICLE"),
-            "Random":      _decision_pct(metrics["random"]["decision_type"],      "SERVICE_VEHICLE"),
-            "Greedy_Comp": _decision_pct(metrics["greedy_comp"]["decision_type"], "SERVICE_VEHICLE"),
-            "Greedy_Dist": _decision_pct(metrics["greedy_dist"]["decision_type"], "SERVICE_VEHICLE"),
-        }, episode)
-        writer.add_scalars("Fail_Deadline_Rate", {
-            "DDQN":        _fail_reason_pct(metrics["ddqn"]["fail_reason"],        "DEADLINE_MISSED"),
-            "Random":      _fail_reason_pct(metrics["random"]["fail_reason"],      "DEADLINE_MISSED"),
-            "Greedy_Comp": _fail_reason_pct(metrics["greedy_comp"]["fail_reason"], "DEADLINE_MISSED"),
-            "Greedy_Dist": _fail_reason_pct(metrics["greedy_dist"]["fail_reason"], "DEADLINE_MISSED"),
-        }, episode)
-        writer.add_scalars("Fail_Handover_Rate", {
-            "DDQN":        _fail_reason_pct(metrics["ddqn"]["fail_reason"],        "Handover_Fail"),
-            "Random":      _fail_reason_pct(metrics["random"]["fail_reason"],      "Handover_Fail"),
-            "Greedy_Comp": _fail_reason_pct(metrics["greedy_comp"]["fail_reason"], "Handover_Fail"),
-            "Greedy_Dist": _fail_reason_pct(metrics["greedy_dist"]["fail_reason"], "Handover_Fail"),
-        }, episode)
-        writer.add_scalars("QoS_Success_Rate", dict(
-            **{f"DDQN_qos{q}":        _qos_success_pct(metrics["ddqn"]["qos"],        metrics["ddqn"]["success"],        q) for q in (1, 2, 3)},
-            **{f"Random_qos{q}":      _qos_success_pct(metrics["random"]["qos"],      metrics["random"]["success"],      q) for q in (1, 2, 3)},
-            **{f"Greedy_Comp_qos{q}": _qos_success_pct(metrics["greedy_comp"]["qos"], metrics["greedy_comp"]["success"], q) for q in (1, 2, 3)},
-            **{f"Greedy_Dist_qos{q}": _qos_success_pct(metrics["greedy_dist"]["qos"], metrics["greedy_dist"]["success"], q) for q in (1, 2, 3)},
-        ), episode)
         writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
         if loss is not None:
             writer.add_scalar("Loss", loss, episode)
 
         if episode % 10 == 0:
-            import datetime
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             avg_ddqn = np.mean(metrics["ddqn"]["reward"][-100:])
             print(f"[{ts}] Ep {episode} | DDQN: {avg_ddqn:.2f} | Eps: {ddqn_agent.epsilon:.2f}")
@@ -505,28 +632,20 @@ def run():
     print(f"Training Complete. Logs saved to {Config.LOG_DIR}")
     print(f"DDQN Model saved to {Config.MODEL_SAVE_PATH}")
 
-    # --- Plotting ---
     fig, ax = plt.subplots(1, 3, figsize=(24, 6))
     def smooth(data, window=100):
         return np.convolve(data, np.ones(window)/window, mode='valid')
-
     def plot_all(ax_idx, metric_key, title):
         ax[ax_idx].plot(smooth(metrics["ddqn"][metric_key]), label='DDQN (Ours)', color='blue', linewidth=2)
         ax[ax_idx].plot(smooth(metrics["greedy_comp"][metric_key]), label='Greedy-Comp', color='orange', linestyle='--')
         ax[ax_idx].plot(smooth(metrics["greedy_dist"][metric_key]), label='Greedy-Dist', color='green', linestyle=':')
         ax[ax_idx].plot(smooth(metrics["random"][metric_key]), label='Random', color='grey', alpha=0.3)
-        ax[ax_idx].set_title(title)
-        ax[ax_idx].legend()
-
+        ax[ax_idx].set_title(title); ax[ax_idx].legend()
     plot_all(0, "reward", "Average Reward")
-    plot_all(1, "success", "Task Completion Rate")
-    ax[1].set_ylim(0, 1.1)
+    plot_all(1, "success", "Task Completion Rate"); ax[1].set_ylim(0, 1.1)
     plot_all(2, "latency", "Latency (s)")
-
-    plt.tight_layout()
-    plt.savefig(Config.PLOT_SAVE_PATH)
+    plt.tight_layout(); plt.savefig(Config.PLOT_SAVE_PATH)
     print(f"Plots saved to {Config.PLOT_SAVE_PATH}")
-    plt.show()
 
 
 if __name__ == "__main__":

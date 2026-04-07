@@ -686,6 +686,7 @@ class IoVRedisEnv:
         Equivalent to reset() but works with an already-fetched request.
         """
         self.task_request = request
+        self.task_type = request.get("task_type", "UNKNOWN")  # for per-type TensorBoard metrics
         active_rsu_id     = request.get('rsu_id', self.rsu_ids[0])
 
         self.rsu_states = {rsu_id: self._fetch_rsu_state(rsu_id) for rsu_id in self.rsu_ids}
@@ -882,6 +883,79 @@ class IoVRedisEnv:
             'decision_type': decision_type,
             'target_id':     target_id,
         }
+
+    # ── Single-agent API ──────────────────────────────────────────────────────
+
+    def write_decision(self, task_id: str, action: int, agent_name: str) -> dict:
+        """
+        Write a single-agent decision to task:{task_id}:decision.
+        Returns (decision_type, target_id) as a dict.
+        """
+        decision_type, target_id = self._action_to_target(action)
+        pipe = self.r.pipeline()
+        pipe.hset(f"task:{task_id}:decision", mapping={
+            "agent":  agent_name,
+            "type":   decision_type,
+            "target": target_id,
+        })
+        pipe.expire(f"task:{task_id}:decision", 300)
+        pipe.execute()
+        return {"type": decision_type, "target": target_id}
+
+    def batch_check_single_results(self, pending: dict) -> dict:
+        """
+        Pipeline batch-read task:{id}:result for all pending task_ids.
+        Returns {task_id: result_dict} for tasks whose result has arrived.
+        result_dict keys: status, latency, energy, reason
+        pending: {task_id: any}
+        """
+        task_ids = list(pending.keys())
+        if not task_ids:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for tid in task_ids:
+            pipe.hgetall(f"task:{tid}:result")
+        all_data = pipe.execute()
+        ready = {}
+        for tid, data in zip(task_ids, all_data):
+            if data and "status" in data:
+                ready[tid] = {
+                    "status":  data["status"],
+                    "latency": float(data.get("latency", 999.0)),
+                    "energy":  float(data.get("energy",  0.0)),
+                    "reason":  data.get("reason", "UNKNOWN"),
+                }
+        return ready
+
+    def poll_local_result(self):
+        """
+        Non-blocking lpop from local_results:queue; fetches task:{id}:local_result.
+        Returns (task_id, result_dict) if available, else None.
+        result_dict keys: task_type, qos_value, deadline_s, status, latency, energy, reason
+        """
+        task_id = self.r.lpop("local_results:queue")
+        if not task_id:
+            return None
+        data = self.r.hgetall(f"task:{task_id}:local_result")
+        if not data:
+            return task_id, {}
+        return task_id, {
+            "task_type": data.get("task_type", "UNKNOWN"),
+            "qos_value": float(data.get("qos_value", 0.0)),
+            "deadline_s": float(data.get("deadline_s", 0.0)),
+            "status":    data.get("status",  "FAILED"),
+            "latency":   float(data.get("latency", 999.0)),
+            "energy":    float(data.get("energy",  0.0)),
+            "reason":    data.get("reason",  "UNKNOWN"),
+        }
+
+    def read_offload_mode(self) -> str:
+        """
+        Read sim:offload_mode written by the simulator at startup.
+        Returns one of "heuristic", "allOffload", "allLocal", or "unknown".
+        """
+        val = self.r.get("sim:offload_mode")
+        return val if val else "unknown"
 
     def close(self):
         self.r.close()

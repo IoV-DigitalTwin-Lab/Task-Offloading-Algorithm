@@ -181,9 +181,10 @@ class Config:
             cls.REDIS_RSU_FIELDS     = cols["rsu"]
             cls.REDIS_VEHICLE_FIELDS = cols["vehicle"]
             cls.REDIS_NORMALIZATION  = _redis.get("normalization", {})
-            cls.DRL_INSTANCES        = _redis.get("drl_instances", [
+            cls.DRL_INSTANCES        = _redis.get("agent_instances",
+                                         _redis.get("drl_instances", [  # fallback for old configs
                 {"instance_id": 0, "rsu_id": cls.RSU_IDS[0], "redis_db": 0, "active": True}
-            ])
+            ]))
 
             # Recompute state/action dims for redis mode
             cls.TASK_FEAT_DIM    = len(cls.REDIS_TASK_FIELDS)
