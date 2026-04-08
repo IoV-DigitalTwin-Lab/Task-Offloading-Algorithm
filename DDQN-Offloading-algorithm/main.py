@@ -7,6 +7,7 @@ import threading
 import time
 import json
 import datetime
+import signal
 from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 
@@ -136,6 +137,10 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
 
     For 'local' agent: skip steps 1-3, only drain local_results:queue.
     """
+    # Treat SIGTERM (sent by shell/OS when sim ends) the same as Ctrl-C so the
+    # results JSON is always saved, even when killed by the background job manager.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
     iid      = instance_cfg['instance_id']
     redis_db = instance_cfg['redis_db']
     rsu_id   = instance_cfg['rsu_id']
