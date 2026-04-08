@@ -123,7 +123,7 @@ def _select_action(agent, agent_name, state, mask, env, request):
 # Single-agent Redis training loop
 # ---------------------------------------------------------------------------
 
-def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
+def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_event=None):
     """
     Single-agent training/evaluation loop for one RSU instance.
 
@@ -137,9 +137,8 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
 
     For 'local' agent: skip steps 1-3, only drain local_results:queue.
     """
-    # Treat SIGTERM (sent by shell/OS when sim ends) the same as Ctrl-C so the
-    # results JSON is always saved, even when killed by the background job manager.
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    if stop_event is None:
+        stop_event = threading.Event()
 
     iid      = instance_cfg['instance_id']
     redis_db = instance_cfg['redis_db']
@@ -205,7 +204,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
             print(f"[{agent_name}-{iid}] WARNING: no vehicle states — starting anyway.")
 
     try:
-        while True:
+        while not stop_event.is_set():
 
             # ── 1. Drain offloading requests ──────────────────────────────────
             _offload_drained = 0
@@ -361,6 +360,10 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
 
     except KeyboardInterrupt:
         print(f"[{agent_name}-{iid}] Interrupted — saving results...")
+        stop_event.set()
+
+    if stop_event.is_set():
+        print(f"[{agent_name}-{iid}] Stop requested — finalizing artifacts...")
 
     # ── Save final model (ddqn) ───────────────────────────────────────────────
     if ddqn_agent is not None and offload_rewards:
@@ -509,20 +512,43 @@ def run():
         print(f"Simulator offload mode: {offload_mode}")
 
         if len(active) == 1:
-            _run_single_agent_instance(active[0], args.agent, offload_mode)
+            stop_event = threading.Event()
+            def _request_shutdown_single(signum, _frame):
+                if not stop_event.is_set():
+                    print(f"\n[MAIN] Received signal {signum}; stopping agent loop...")
+                    stop_event.set()
+            signal.signal(signal.SIGINT, _request_shutdown_single)
+            signal.signal(signal.SIGTERM, _request_shutdown_single)
+            _run_single_agent_instance(active[0], args.agent, offload_mode, stop_event=stop_event)
         else:
+            stop_event = threading.Event()
+            def _request_shutdown(signum, _frame):
+                if not stop_event.is_set():
+                    print(f"\n[MAIN] Received signal {signum}; stopping all agent instances...")
+                    stop_event.set()
+            signal.signal(signal.SIGINT, _request_shutdown)
+            signal.signal(signal.SIGTERM, _request_shutdown)
             threads = [
                 threading.Thread(
                     target=_run_single_agent_instance,
-                    args=(inst, args.agent, offload_mode),
-                    daemon=True
+                    args=(inst, args.agent, offload_mode, stop_event),
+                    daemon=False
                 )
                 for inst in active
             ]
             for t in threads:
                 t.start()
-            for t in threads:
-                t.join()
+            try:
+                while any(t.is_alive() for t in threads):
+                    for t in threads:
+                        t.join(timeout=0.5)
+            except KeyboardInterrupt:
+                print("\n[MAIN] KeyboardInterrupt received; requesting shutdown...")
+                stop_event.set()
+            finally:
+                stop_event.set()
+                for t in threads:
+                    t.join()
         print("All agent instances finished.")
         return
 

@@ -28,11 +28,11 @@ import numpy as np
 
 TASK_TYPES = [
     "LOCAL_OBJECT_DETECTION",
-    "COOP_PERCEPTION",
+    "COOPERATIVE_PERCEPTION",
     "ROUTE_OPTIMIZATION",
-    "FLEET_FORECASTING",
-    "VOICE_COMMAND",
-    "SENSOR_HEALTH",
+    "FLEET_TRAFFIC_FORECAST",
+    "VOICE_COMMAND_PROCESSING",
+    "SENSOR_HEALTH_CHECK",
 ]
 
 METRIC_CHOICES = ["reward", "latency", "energy", "success_rate", "qos", "failure"]

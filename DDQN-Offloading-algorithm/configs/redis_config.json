@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/runs"
+        "log_dir": "output/runs_single_agent3"
     },
     "rewards": {
         "reward_success": 15,
