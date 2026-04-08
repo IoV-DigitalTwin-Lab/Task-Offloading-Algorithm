@@ -157,6 +157,8 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
     TRAIN_EVERY         = 4
     MAX_DRAIN_PER_CYCLE = 20
 
+    last_logged_episode = -1   # guard against log spam: only print once per milestone
+
     # ── Accumulators ─────────────────────────────────────────────────────────
     # Per-task-type rolling data (all tasks combined)
     lat_by_type  = defaultdict(list)   # task_type → [latency, ...]
@@ -332,7 +334,8 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
                 completions_since_train = 0
 
             # ── 6. Periodic console log + model save ──────────────────────────
-            if episode > 0 and episode % 50 == 0:
+            if episode > 0 and episode % 50 == 0 and episode != last_logged_episode:
+                last_logged_episode = episode
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 sr = _success_rate(all_successes)
                 print(f"[{agent_name}-{iid}] [{ts}] ep={episode} | "
