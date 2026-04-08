@@ -201,12 +201,14 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
         while True:
 
             # ── 1. Drain offloading requests ──────────────────────────────────
+            _offload_drained = 0
             if agent_name != 'local':
                 for _ in range(MAX_DRAIN_PER_CYCLE):
                     request = env._poll_request_nonblocking()
                     if request is None:
                         break
 
+                    _offload_drained += 1
                     state = env.setup_from_request(request)
                     if state is None:
                         # Vehicle state missing: write fallback RSU-0 decision
@@ -342,9 +344,11 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode):
                     print(f"  >> [{agent_name}-{iid}] Model saved | avg_reward={avg_r:.3f}")
 
             # ── Idle sleep ────────────────────────────────────────────────────
-            both_empty = (agent_name != 'local' and not pending and _local_drained == 0) or \
-                         (agent_name == 'local' and _local_drained == 0)
-            if both_empty:
+            # Sleep whenever nothing happened this cycle (no new requests, no new results,
+            # no local results).  This avoids busy-looping while waiting for simulator
+            # results even when the pending dict is non-empty.
+            nothing_happened = _offload_drained == 0 and len(ready) == 0 and _local_drained == 0
+            if nothing_happened:
                 time.sleep(Config.REDIS_POLL_INTERVAL)
 
     except KeyboardInterrupt:

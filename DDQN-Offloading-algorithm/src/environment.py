@@ -677,6 +677,7 @@ class IoVRedisEnv:
             'cpu_req_mcycles':  float(data.get('cpu_cycles', 0)) / 1e6,
             'deadline_s':       float(data.get('deadline_seconds', 1.0)),
             'qos':              float(data.get('qos_value', 1.0)),
+            'task_type':        data.get('task_type', 'UNKNOWN'),  # for per-type TensorBoard panels
         }
 
     def setup_from_request(self, request):
@@ -861,9 +862,10 @@ class IoVRedisEnv:
         Standalone reward calculation given a stored task_request dict and an agent's result.
         Used by the async loop so it can compute rewards for any pending task independent
         of the current self.task_request state.
+        result keys (from batch_check_single_results): status, latency, energy, reason
         """
         success = result['status'] == 'COMPLETED_ON_TIME'
-        latency = result['total_latency']
+        latency = result['latency']   # key written by writeSingleResult → batch_check_single_results
         energy  = result['energy']
 
         if success:
@@ -879,7 +881,7 @@ class IoVRedisEnv:
             'latency':       latency,
             'energy':        energy,
             'success':       1 if success else 0,
-            'fail_reason':   result.get('fail_reason', 'NONE' if success else 'UNKNOWN'),
+            'fail_reason':   result.get('reason', 'NONE' if success else 'UNKNOWN'),
             'decision_type': decision_type,
             'target_id':     target_id,
         }
