@@ -3,16 +3,19 @@ compare.py — Offline multi-run comparison plot generator.
 
 Usage:
     python3 compare.py \
-        --runs results/ddqn_heuristic_20260406_inst0.json \
-               results/random_allOffload_20260406_inst0.json \
+        --runs results/ddqn_heuristic_20260408_184145_inst0.json \
+               results/greedy_compute_allOffload_20260408_192923_inst0.json \
+               results/greedy_distance_allOffload_20260408_200108_inst0.json \
+               results/local_allLocal_20260408_203456_inst0.json /
         --metrics reward latency energy success_rate \
-        --output output/comparison_2026-04-06.png
+        --output output/comparison_2026-04-08_test_run1.png
 
 Loads multiple per-run JSON result files (written by main.py) and produces
 smoothed line-plot comparisons.  Each run is labelled "<agent> (<mode>)".
 """
 
 import argparse
+import glob
 import json
 import sys
 from pathlib import Path
@@ -304,7 +307,7 @@ def main():
     # Expand glob patterns if shell didn't (e.g. --runs results/*.json on Windows)
     paths: list[str] = []
     for pattern in args.runs:
-        expanded = sorted(Path(".").glob(pattern))
+        expanded = sorted(glob.glob(pattern))
         if expanded:
             paths.extend(str(p) for p in expanded)
         else:
