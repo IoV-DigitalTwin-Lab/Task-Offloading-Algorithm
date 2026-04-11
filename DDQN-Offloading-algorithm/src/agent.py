@@ -144,7 +144,7 @@ class DDQNAgent:
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 10.0) 
         self.optimizer.step()
         
-        td_errors = loss_elementwise.detach().cpu().numpy()
+        td_errors = loss_elementwise.detach().cpu().numpy().flatten()
         self.memory.update_priorities(indices, td_errors)
         
         # Anneal Epsilon and Beta

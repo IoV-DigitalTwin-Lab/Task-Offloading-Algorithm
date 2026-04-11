@@ -67,7 +67,8 @@ class Config:
     REDIS_TASK_FIELDS    = ["mem_footprint_mb", "cpu_req_mcycles", "deadline_s", "qos"]
     REDIS_RSU_FIELDS     = ["cpu_available", "memory_available", "queue_length", "cpu_utilization"]
     REDIS_VEHICLE_FIELDS = ["cpu_available", "mem_available", "cpu_utilization",
-                            "mem_utilization", "queue_length", "speed", "heading", "distance_to_origin"]
+                            "mem_utilization", "queue_length", "speed", "heading",
+                            "acceleration", "distance_to_origin"]
     REDIS_NORMALIZATION  = {}
 
     HIDDEN_DIM    = 256
@@ -180,9 +181,10 @@ class Config:
             cls.REDIS_RSU_FIELDS     = cols["rsu"]
             cls.REDIS_VEHICLE_FIELDS = cols["vehicle"]
             cls.REDIS_NORMALIZATION  = _redis.get("normalization", {})
-            cls.DRL_INSTANCES        = _redis.get("drl_instances", [
+            cls.DRL_INSTANCES        = _redis.get("agent_instances",
+                                         _redis.get("drl_instances", [  # fallback for old configs
                 {"instance_id": 0, "rsu_id": cls.RSU_IDS[0], "redis_db": 0, "active": True}
-            ])
+            ]))
 
             # Recompute state/action dims for redis mode
             cls.TASK_FEAT_DIM    = len(cls.REDIS_TASK_FIELDS)

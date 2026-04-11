@@ -17,4 +17,5 @@ DDQN-Offloading-algorithm/REDIS_PRIMARY_ARCHITECTURE.md
 DDQN-Offloading-algorithm/REDIS_POSTGRES_ARCHITECTURE.md
 DDQN-Offloading-algorithm/output/*
 DDQN-Offloading-algorithm/logs/*
-DDQN-Offloading-algorithm/filtered.log
+DDQN-Offloading-algorithm/*.log
+DDQN-Offloading-algorithm/results/*

@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/runs"
+        "log_dir": "output/runs_single_agent3"
     },
     "rewards": {
         "reward_success": 15,
@@ -35,7 +35,7 @@
         "num_rsus": 3,
         "max_neighbors": 5,
         "rsu_ids": ["RSU_0", "RSU_1", "RSU_2"],
-        "drl_instances": [
+        "agent_instances": [
             {"instance_id": 0, "rsu_id": "RSU_0", "redis_db": 0, "active": true},
             {"instance_id": 1, "rsu_id": "RSU_1", "redis_db": 1, "active": true},
             {"instance_id": 2, "rsu_id": "RSU_2", "redis_db": 2, "active": false}

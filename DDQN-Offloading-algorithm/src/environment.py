@@ -391,6 +391,7 @@ class IoVRedisEnv:
             'processing_count': int(float(data.get('processing_count', 0))),
             'speed':            float(data.get('speed', 0)),
             'heading':          float(data.get('heading', 0)),
+            'acceleration':     float(data.get('acceleration', 0)),
             'pos_x':            float(data.get('pos_x', 0)),
             'pos_y':            float(data.get('pos_y', 0)),
             'sinr':             float(data.get('sinr', 0)),  # populated by simulator in future
@@ -676,6 +677,7 @@ class IoVRedisEnv:
             'cpu_req_mcycles':  float(data.get('cpu_cycles', 0)) / 1e6,
             'deadline_s':       float(data.get('deadline_seconds', 1.0)),
             'qos':              float(data.get('qos_value', 1.0)),
+            'task_type':        data.get('task_type', 'UNKNOWN'),  # for per-type TensorBoard panels
         }
 
     def setup_from_request(self, request):
@@ -685,6 +687,7 @@ class IoVRedisEnv:
         Equivalent to reset() but works with an already-fetched request.
         """
         self.task_request = request
+        self.task_type = request.get("task_type", "UNKNOWN")  # for per-type TensorBoard metrics
         active_rsu_id     = request.get('rsu_id', self.rsu_ids[0])
 
         self.rsu_states = {rsu_id: self._fetch_rsu_state(rsu_id) for rsu_id in self.rsu_ids}
@@ -767,14 +770,102 @@ class IoVRedisEnv:
             for agent in agent_names
         }
 
+    def check_late_baselines(self, task_id, missing_agents):
+        """
+        Poll Redis for specific missing baseline agents.
+        Returns (arrived_dict, still_missing_list).
+        arrived_dict: {agent_name: result_dict} for agents that have now reported.
+        """
+        data = self.r.hgetall(f"task:{task_id}:results")
+        arrived, still_missing = {}, []
+        for agent in missing_agents:
+            if f'{agent}_status' in data:
+                arrived[agent] = {
+                    'status':        data[f'{agent}_status'],
+                    'total_latency': float(data.get(f'{agent}_latency', 999)),
+                    'energy':        float(data.get(f'{agent}_energy', 0.0)),
+                    'fail_reason':   data.get(f'{agent}_reason',
+                                              'NONE' if data[f'{agent}_status'] == 'COMPLETED_ON_TIME'
+                                              else 'UNKNOWN'),
+                }
+            else:
+                still_missing.append(agent)
+        return arrived, still_missing
+
+    def batch_check_results(self, pending_dict):
+        """
+        Batch poll Redis for all pending tasks in a single pipeline round-trip.
+        Returns a dict: {task_id: results_raw} for tasks whose ddqn_status has arrived.
+        Tasks not yet ready are omitted from the returned dict.
+        pending_dict: {task_id: entry} where entry has 'actions' key.
+        """
+        task_ids = list(pending_dict.keys())
+        if not task_ids:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for task_id in task_ids:
+            pipe.hgetall(f"task:{task_id}:results")
+        all_data = pipe.execute()  # single network round-trip
+
+        ready = {}
+        for task_id, data in zip(task_ids, all_data):
+            if not data or 'ddqn_status' not in data:
+                continue
+            agent_names = list(pending_dict[task_id]['actions'].keys())
+            ready[task_id] = {
+                agent: {
+                    'status':        data.get(f'{agent}_status', 'FAILED'),
+                    'total_latency': float(data.get(f'{agent}_latency', 999)),
+                    'energy':        float(data.get(f'{agent}_energy',  0.0)),
+                    'fail_reason':   data.get(f'{agent}_reason',
+                                              'TIMEOUT' if f'{agent}_status' not in data else 'UNKNOWN'),
+                }
+                for agent in agent_names
+            }
+        return ready
+
+    def batch_check_late_baselines(self, late_baselines_dict):
+        """
+        Batch poll Redis for late-arriving baselines in a single pipeline round-trip.
+        Returns {task_id: (arrived_dict, still_missing_list)}.
+        late_baselines_dict: {task_id: {'missing': [...], ...}}
+        """
+        task_ids = list(late_baselines_dict.keys())
+        if not task_ids:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for task_id in task_ids:
+            pipe.hgetall(f"task:{task_id}:results")
+        all_data = pipe.execute()
+
+        results = {}
+        for task_id, data in zip(task_ids, all_data):
+            missing_agents = late_baselines_dict[task_id]['missing']
+            arrived, still_missing = {}, []
+            for agent in missing_agents:
+                if data and f'{agent}_status' in data:
+                    arrived[agent] = {
+                        'status':        data[f'{agent}_status'],
+                        'total_latency': float(data.get(f'{agent}_latency', 999)),
+                        'energy':        float(data.get(f'{agent}_energy', 0.0)),
+                        'fail_reason':   data.get(f'{agent}_reason',
+                                                  'NONE' if data[f'{agent}_status'] == 'COMPLETED_ON_TIME'
+                                                  else 'UNKNOWN'),
+                    }
+                else:
+                    still_missing.append(agent)
+            results[task_id] = (arrived, still_missing)
+        return results
+
     def compute_reward_for(self, task_request, result, decision_type, target_id):
         """
         Standalone reward calculation given a stored task_request dict and an agent's result.
         Used by the async loop so it can compute rewards for any pending task independent
         of the current self.task_request state.
+        result keys (from batch_check_single_results): status, latency, energy, reason
         """
         success = result['status'] == 'COMPLETED_ON_TIME'
-        latency = result['total_latency']
+        latency = result['latency']   # key written by writeSingleResult → batch_check_single_results
         energy  = result['energy']
 
         if success:
@@ -790,10 +881,83 @@ class IoVRedisEnv:
             'latency':       latency,
             'energy':        energy,
             'success':       1 if success else 0,
-            'fail_reason':   result.get('fail_reason', 'NONE' if success else 'UNKNOWN'),
+            'fail_reason':   result.get('reason', 'NONE' if success else 'UNKNOWN'),
             'decision_type': decision_type,
             'target_id':     target_id,
         }
+
+    # ── Single-agent API ──────────────────────────────────────────────────────
+
+    def write_decision(self, task_id: str, action: int, agent_name: str) -> dict:
+        """
+        Write a single-agent decision to task:{task_id}:decision.
+        Returns (decision_type, target_id) as a dict.
+        """
+        decision_type, target_id = self._action_to_target(action)
+        pipe = self.r.pipeline()
+        pipe.hset(f"task:{task_id}:decision", mapping={
+            "agent":  agent_name,
+            "type":   decision_type,
+            "target": target_id,
+        })
+        pipe.expire(f"task:{task_id}:decision", 300)
+        pipe.execute()
+        return {"type": decision_type, "target": target_id}
+
+    def batch_check_single_results(self, pending: dict) -> dict:
+        """
+        Pipeline batch-read task:{id}:result for all pending task_ids.
+        Returns {task_id: result_dict} for tasks whose result has arrived.
+        result_dict keys: status, latency, energy, reason
+        pending: {task_id: any}
+        """
+        task_ids = list(pending.keys())
+        if not task_ids:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for tid in task_ids:
+            pipe.hgetall(f"task:{tid}:result")
+        all_data = pipe.execute()
+        ready = {}
+        for tid, data in zip(task_ids, all_data):
+            if data and "status" in data:
+                ready[tid] = {
+                    "status":  data["status"],
+                    "latency": float(data.get("latency", 999.0)),
+                    "energy":  float(data.get("energy",  0.0)),
+                    "reason":  data.get("reason", "UNKNOWN"),
+                }
+        return ready
+
+    def poll_local_result(self):
+        """
+        Non-blocking lpop from local_results:queue; fetches task:{id}:local_result.
+        Returns (task_id, result_dict) if available, else None.
+        result_dict keys: task_type, qos_value, deadline_s, status, latency, energy, reason
+        """
+        task_id = self.r.lpop("local_results:queue")
+        if not task_id:
+            return None
+        data = self.r.hgetall(f"task:{task_id}:local_result")
+        if not data:
+            return task_id, {}
+        return task_id, {
+            "task_type": data.get("task_type", "UNKNOWN"),
+            "qos_value": float(data.get("qos_value", 0.0)),
+            "deadline_s": float(data.get("deadline_s", 0.0)),
+            "status":    data.get("status",  "FAILED"),
+            "latency":   float(data.get("latency", 999.0)),
+            "energy":    float(data.get("energy",  0.0)),
+            "reason":    data.get("reason",  "UNKNOWN"),
+        }
+
+    def read_offload_mode(self) -> str:
+        """
+        Read sim:offload_mode written by the simulator at startup.
+        Returns one of "heuristic", "allOffload", "allLocal", or "unknown".
+        """
+        val = self.r.get("sim:offload_mode")
+        return val if val else "unknown"
 
     def close(self):
         self.r.close()
