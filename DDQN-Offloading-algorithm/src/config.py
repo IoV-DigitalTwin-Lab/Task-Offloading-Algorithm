@@ -68,8 +68,18 @@ class Config:
     REDIS_RSU_FIELDS     = ["cpu_available", "memory_available", "queue_length", "cpu_utilization"]
     REDIS_VEHICLE_FIELDS = ["cpu_available", "mem_available", "cpu_utilization",
                             "mem_utilization", "queue_length", "speed", "heading",
-                            "acceleration", "distance_to_origin"]
+                            "acceleration", "distance_to_origin",
+                            "tau_up", "tau_comp", "tau_down", "tau_total"]
     REDIS_NORMALIZATION  = {}
+
+    # --- Phase 2: Secondary DT and tau settings ---
+    DT2_RUN_ID = os.getenv("DT2_RUN_ID", "DT-Secondary-MotionChannel")
+    DT2_Q_SCAN_LIMIT = int(os.getenv("DT2_Q_SCAN_LIMIT", "50000"))
+    DT2_PRED_STEP_S = float(os.getenv("DT2_PRED_STEP_S", "0.02"))
+    LINK_BANDWIDTH_HZ = float(os.getenv("LINK_BANDWIDTH_HZ", "10000000"))
+    LINK_RATE_EFFICIENCY = float(os.getenv("LINK_RATE_EFFICIENCY", "0.8"))
+    TASK_OUTPUT_RATIO = float(os.getenv("TASK_OUTPUT_RATIO", "0.25"))
+    TAU_MISSING_PENALTY_S = float(os.getenv("TAU_MISSING_PENALTY_S", "5.0"))
 
     HIDDEN_DIM    = 256
     EPISODS       = 10000
@@ -175,6 +185,15 @@ class Config:
             cls.RSU_IDS              = _redis.get("rsu_ids", [f"RSU_{i}" for i in range(cls.NUM_RSUS)])
             # max_neighbors in redis section overrides iov_network value
             cls.MAX_NEIGHBORS        = _redis.get("max_neighbors", cls.MAX_NEIGHBORS)
+
+            # Phase 2 secondary DT and tau settings
+            cls.DT2_RUN_ID            = _redis.get("dt2_run_id", cls.DT2_RUN_ID)
+            cls.DT2_Q_SCAN_LIMIT      = _redis.get("q_cycle_scan_limit", cls.DT2_Q_SCAN_LIMIT)
+            cls.DT2_PRED_STEP_S       = _redis.get("prediction_step_s", cls.DT2_PRED_STEP_S)
+            cls.LINK_BANDWIDTH_HZ     = _redis.get("link_bandwidth_hz", cls.LINK_BANDWIDTH_HZ)
+            cls.LINK_RATE_EFFICIENCY  = _redis.get("link_rate_efficiency", cls.LINK_RATE_EFFICIENCY)
+            cls.TASK_OUTPUT_RATIO     = _redis.get("task_output_ratio", cls.TASK_OUTPUT_RATIO)
+            cls.TAU_MISSING_PENALTY_S = _redis.get("tau_missing_penalty_s", cls.TAU_MISSING_PENALTY_S)
 
             cols = _redis["state_columns"]
             cls.REDIS_TASK_FIELDS    = cols["task"]
