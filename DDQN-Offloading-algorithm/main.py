@@ -12,8 +12,8 @@ from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 
 from src.environment import IoVDummyEnv, IoVRedisEnv
-from src.agent import DDQNAgent
 from src.agents import (
+    DDQNAgent, VanillaDQNAgent,
     RandomAgent, GreedyComputeAgent, MinLatencyAgent,
     LeastQueueAgent, GreedyDistanceAgent, LocalAgent,
 )
@@ -91,6 +91,8 @@ def _rolling_mean(data, key, window=50):
 def _create_agent(agent_name):
     if agent_name == 'ddqn':
         return DDQNAgent()
+    elif agent_name == 'vanilla_dqn':
+        return VanillaDQNAgent()
     elif agent_name == 'random':
         return RandomAgent()
     elif agent_name == 'greedy_compute':
@@ -109,7 +111,7 @@ def _create_agent(agent_name):
 
 def _select_action(agent, agent_name, state, mask, env, request):
     """Dispatch select_action for different agent interfaces."""
-    if agent_name == 'ddqn':
+    if agent_name in ('ddqn', 'vanilla_dqn'):
         return agent.select_action(state, mask=mask)
     elif agent_name == 'random':
         return agent.select_action(mask)
@@ -154,8 +156,8 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     env    = IoVRedisEnv(redis_db=redis_db, instance_id=iid)
     agent  = _create_agent(agent_name)
 
-    # DDQN-specific reference (None for baselines)
-    ddqn_agent = agent if agent_name == 'ddqn' else None
+    # DRL-agent reference for training (None for heuristic baselines)
+    ddqn_agent = agent if agent_name in ('ddqn', 'vanilla_dqn') else None
 
     TIMEOUT             = Config.REDIS_RESULT_TIMEOUT
     TRAIN_EVERY         = 4
@@ -196,11 +198,17 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
         _MAX_WAIT = 15
         print(f"[{agent_name}-{iid}] Waiting for vehicle states (up to {_MAX_WAIT}s)...")
         while time.time() - _wait_start < _MAX_WAIT:
+            if stop_event.is_set():
+                print(f"[{agent_name}-{iid}] Shutdown requested during vehicle wait — exiting.")
+                return
             if env.r.keys('vehicle:*:state'):
                 print(f"[{agent_name}-{iid}] Vehicle states found. Starting loop.")
                 break
             time.sleep(1.0)
         else:
+            if stop_event.is_set():
+                print(f"[{agent_name}-{iid}] Shutdown requested during vehicle wait — exiting.")
+                return
             print(f"[{agent_name}-{iid}] WARNING: no vehicle states — starting anyway.")
 
     try:
@@ -482,16 +490,16 @@ def run():
     parser.add_argument('--env', type=str, default='dummy', choices=['dummy', 'redis'],
                         help='Environment type: dummy or redis')
     parser.add_argument('--agent', type=str, default=None,
-                        choices=['ddqn', 'random', 'greedy_compute', 'min_latency',
-                                 'least_queue', 'greedy_distance', 'local'],
+                        choices=['ddqn', 'vanilla_dqn', 'random', 'greedy_compute',
+                                 'min_latency', 'least_queue', 'greedy_distance', 'local'],
                         help='Agent type (required for --env redis)')
     args = parser.parse_args()
 
     if args.env == 'redis':
         if args.agent is None:
             print("[ERROR] --agent is required when using --env redis")
-            print("  choices: ddqn, random, greedy_compute, min_latency, "
-                  "least_queue, greedy_distance, local")
+            print("  choices: ddqn, vanilla_dqn, random, greedy_compute, "
+                  "min_latency, least_queue, greedy_distance, local")
             return
 
         Config.load_config("redis_config.json")
