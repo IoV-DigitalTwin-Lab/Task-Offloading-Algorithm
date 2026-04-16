@@ -398,29 +398,57 @@ class IoVRedisEnv:
             'distance_to_origin': 0.0,  # computed after origin is known
         }
 
+    # Maximum V2V communication range in metres.
+    # Matches the ~178 m free-space threshold derived from PayloadVehicleApp's
+    # estimateV2vRssiDbm() at the -85 dBm sensitivity limit.  We use a slightly
+    # larger value (250 m) to give the agent a small safety margin for vehicles
+    # that are momentarily near the boundary.
+    MAX_SV_DISTANCE_M = 250.0
+
     def _fetch_candidates(self, origin_id, origin_x, origin_y):
         """
-        Fetch the top service-vehicle candidates from the Redis sorted set
-        (sorted by CPU score; re-sorted by distance here).
+        Fetch service-vehicle candidates from the Redis sorted set.
+
+        Changes vs. original:
+        1. Fetch a much larger pool (50) so nearby SVs ranked lower by CPU
+           score are not silently excluded.
+        2. Prune stale entries whose vehicle:{id}:state key has expired.
+        3. Filter to only SVs within MAX_SV_DISTANCE_M of the origin vehicle.
+        4. Re-sort the survivors by distance and keep the MAX_NEIGHBORS closest.
         """
+        # Fetch up to 50 entries from the sorted set (avoids missing nearby SVs)
         top = self.r.zrevrange(
-            'service_vehicles:available', 0, Config.MAX_NEIGHBORS * 2, withscores=True
+            'service_vehicles:available', 0, 49, withscores=True
         )
         candidates, states = [], []
+        stale_ids = []
         for vehicle_id, _ in top:
             if vehicle_id == origin_id:
                 continue
             state = self._fetch_vehicle_state(vehicle_id)
-            if state:
-                state['distance_to_origin'] = math.sqrt(
-                    (state['pos_x'] - origin_x) ** 2 + (state['pos_y'] - origin_y) ** 2
-                )
+            if state is None:
+                # Vehicle state has expired — remove ghost entry from sorted set
+                stale_ids.append(vehicle_id)
+                continue
+            dist = math.sqrt(
+                (state['pos_x'] - origin_x) ** 2 + (state['pos_y'] - origin_y) ** 2
+            )
+            state['distance_to_origin'] = dist
+            # Only consider SVs within V2V communication range
+            if dist <= self.MAX_SV_DISTANCE_M:
                 candidates.append(vehicle_id)
                 states.append(state)
-            if len(candidates) >= Config.MAX_NEIGHBORS:
-                break
-        # Sort closest first
+
+        # Clean up stale sorted-set entries in one pipeline call
+        if stale_ids:
+            pipe = self.r.pipeline(transaction=False)
+            for sid in stale_ids:
+                pipe.zrem('service_vehicles:available', sid)
+            pipe.execute()
+
+        # Sort closest first, keep at most MAX_NEIGHBORS
         paired = sorted(zip(candidates, states), key=lambda x: x[1]['distance_to_origin'])
+        paired = paired[:Config.MAX_NEIGHBORS]
         if paired:
             candidates, states = zip(*paired)
             return list(candidates), list(states)
@@ -505,14 +533,15 @@ class IoVRedisEnv:
         )
         self.candidates = [
             types.SimpleNamespace(
-                vehicle_id   = s['vehicle_id'],
-                cpu_avail    = s.get('cpu_available', 0.0),
-                mem_avail    = s.get('mem_available', 0.0),
-                queue_length = s.get('queue_length', 0),
-                pos_x        = s.get('pos_x', 0.0),
-                pos_y        = s.get('pos_y', 0.0),
-                speed        = s.get('speed', 0.0),
-                heading      = s.get('heading', 0.0),
+                vehicle_id        = s['vehicle_id'],
+                cpu_avail         = s.get('cpu_available', 0.0),
+                mem_avail         = s.get('mem_available', 0.0),
+                queue_length      = s.get('queue_length', 0),
+                pos_x             = s.get('pos_x', 0.0),
+                pos_y             = s.get('pos_y', 0.0),
+                speed             = s.get('speed', 0.0),
+                heading           = s.get('heading', 0.0),
+                distance_to_origin= s.get('distance_to_origin', 9999.0),
             )
             for s in self.candidate_states
         ]
@@ -531,9 +560,11 @@ class IoVRedisEnv:
             if float(self.rsu_states.get(rsu_id, {}).get('cpu_available', 0)) > 0:
                 mask[i] = 1.0
 
-        # Service-vehicle actions — valid for each present candidate
-        for j in range(len(self.candidates)):
-            mask[self.num_rsus + j] = 1.0
+        # Service-vehicle actions — valid only if candidate is within V2V range
+        for j, sv in enumerate(self.candidates):
+            dist = getattr(sv, 'distance_to_origin', 9999.0)
+            if dist <= self.MAX_SV_DISTANCE_M:
+                mask[self.num_rsus + j] = 1.0
 
         # Safety fallback: allow all RSUs if nothing else is valid
         if mask.sum() == 0:
@@ -714,14 +745,15 @@ class IoVRedisEnv:
         )
         self.candidates = [
             types.SimpleNamespace(
-                vehicle_id   = s['vehicle_id'],
-                cpu_avail    = s.get('cpu_available', 0.0),
-                mem_avail    = s.get('mem_available', 0.0),
-                queue_length = s.get('queue_length', 0),
-                pos_x        = s.get('pos_x', 0.0),
-                pos_y        = s.get('pos_y', 0.0),
-                speed        = s.get('speed', 0.0),
-                heading      = s.get('heading', 0.0),
+                vehicle_id        = s['vehicle_id'],
+                cpu_avail         = s.get('cpu_available', 0.0),
+                mem_avail         = s.get('mem_available', 0.0),
+                queue_length      = s.get('queue_length', 0),
+                pos_x             = s.get('pos_x', 0.0),
+                pos_y             = s.get('pos_y', 0.0),
+                speed             = s.get('speed', 0.0),
+                heading           = s.get('heading', 0.0),
+                distance_to_origin= s.get('distance_to_origin', 9999.0),
             )
             for s in self.candidate_states
         ]

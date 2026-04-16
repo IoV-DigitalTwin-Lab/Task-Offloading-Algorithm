@@ -225,10 +225,15 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                     _offload_drained += 1
                     state = env.setup_from_request(request)
                     if state is None:
-                        # Vehicle state missing: write fallback RSU-0 decision
-                        env.write_decision(request['task_id'], 0, agent_name)
+                        # Vehicle state missing: fall back to the RSU that received the task
+                        # (not always RSU_0 — the vehicle may be served by a different RSU)
+                        req_rsu = request.get('rsu_id', env.rsu_ids[0])
+                        fallback_action = (env.rsu_ids.index(req_rsu)
+                                           if req_rsu in env.rsu_ids else 0)
+                        env.write_decision(request['task_id'], fallback_action, agent_name)
                         print(f"[{agent_name}-{iid}] Task {request['task_id']}: "
-                              f"vehicle state missing — fallback RSU decision")
+                              f"vehicle state missing — fallback to RSU {req_rsu} "
+                              f"(action {fallback_action})")
                         continue
 
                     mask   = env.get_action_mask()
