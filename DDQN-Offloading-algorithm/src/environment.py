@@ -834,12 +834,13 @@ class IoVRedisEnv:
         Returns a dict: agent_name → {'status', 'total_latency', 'energy'}.
         """
         task_id        = self.task_request['task_id']
-        key            = f"task:{task_id}:results"
         required       = {f'{a}_status' for a in agent_names}
         deadline       = time.time() + Config.REDIS_RESULT_TIMEOUT
 
         while time.time() < deadline:
-            data = self.r.hgetall(key)
+            multi_data = self.r.hgetall(f"task:{task_id}:results")
+            single_data = self.r.hgetall(f"task:{task_id}:result")
+            data = self._normalize_result_data(multi_data, single_data)
             if required.issubset(data.keys()):
                 return {
                     agent: {
@@ -964,7 +965,7 @@ class IoVRedisEnv:
         ]
         return self._build_state()
 
-    def write_decisions(self, task_id, actions):
+    def write_decisions(self, task_id, actions, trace_metadata=None):
         """
         Write all agent decisions to Redis atomically and return agent_decisions mapping.
         Extracted from step_multi() so it can be called without blocking on results.
@@ -1004,8 +1005,43 @@ class IoVRedisEnv:
         pipe = self.r.pipeline()
         pipe.hset(f"task:{task_id}:decisions", mapping=mapping)
         pipe.expire(f"task:{task_id}:decisions", 300)
+        ddqn_type, ddqn_target = agent_decisions.get('ddqn', ('RSU', self.rsu_ids[0]))
+        single_mapping = {
+            'agent': 'ddqn',
+            'type': str(ddqn_type),
+            'target': str(ddqn_target),
+        }
+        if trace_metadata:
+            for k, v in trace_metadata.items():
+                if v is None:
+                    continue
+                single_mapping[str(k)] = str(v)
+
+        pipe.hset(f"task:{task_id}:decision", mapping=single_mapping)
+        pipe.expire(f"task:{task_id}:decision", 300)
         pipe.execute()
         return agent_decisions
+
+    @staticmethod
+    def _normalize_result_data(multi_data, single_data):
+        """
+        Normalize simulator results from either multi-agent key (task:{id}:results)
+        or single-agent key (task:{id}:result) into a common dict shape.
+        """
+        if multi_data and 'ddqn_status' in multi_data:
+            return multi_data
+
+        normalized = {}
+        if single_data and ('status' in single_data or 'ddqn_status' in single_data):
+            status = single_data.get('ddqn_status', single_data.get('status', 'FAILED'))
+            latency = single_data.get('ddqn_latency', single_data.get('total_latency', '999'))
+            energy = single_data.get('ddqn_energy', single_data.get('energy', '0.0'))
+            reason = single_data.get('ddqn_reason', single_data.get('fail_reason', 'UNKNOWN'))
+            normalized['ddqn_status'] = status
+            normalized['ddqn_latency'] = latency
+            normalized['ddqn_energy'] = energy
+            normalized['ddqn_reason'] = reason
+        return normalized
 
     def check_results_nonblocking(self, task_id, agent_names):
         """
@@ -1014,8 +1050,9 @@ class IoVRedisEnv:
         can still use the ddqn result for DDQN training.
         Returns None only if ddqn hasn't reported yet.
         """
-        key  = f"task:{task_id}:results"
-        data = self.r.hgetall(key)
+        multi_data = self.r.hgetall(f"task:{task_id}:results")
+        single_data = self.r.hgetall(f"task:{task_id}:result")
+        data = self._normalize_result_data(multi_data, single_data)
         # Must have at least ddqn results to proceed
         if 'ddqn_status' not in data:
             return None
@@ -1065,10 +1102,14 @@ class IoVRedisEnv:
         pipe = self.r.pipeline(transaction=False)
         for task_id in task_ids:
             pipe.hgetall(f"task:{task_id}:results")
+            pipe.hgetall(f"task:{task_id}:result")
         all_data = pipe.execute()  # single network round-trip
 
         ready = {}
-        for task_id, data in zip(task_ids, all_data):
+        for idx, task_id in enumerate(task_ids):
+            multi_data = all_data[2 * idx]
+            single_data = all_data[2 * idx + 1]
+            data = self._normalize_result_data(multi_data, single_data)
             if not data or 'ddqn_status' not in data:
                 continue
             agent_names = list(pending_dict[task_id]['actions'].keys())

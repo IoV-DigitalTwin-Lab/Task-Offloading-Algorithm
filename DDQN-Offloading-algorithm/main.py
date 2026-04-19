@@ -132,11 +132,13 @@ def _run_redis_instance(instance_cfg):
             request = env._poll_request_nonblocking()
             if request is None:
                 break  # queue empty
+            dequeued_wall_s = time.time()
 
             state = env.setup_from_request(request)
             if state is None:
                 # Vehicle state still unavailable — write fallback RSU decision so the
                 # simulator is not left waiting indefinitely for a decision that never arrives.
+                now_wall_s = time.time()
                 pipe = env.r.pipeline()
                 fallback_map = {'agents': ','.join(REDIS_AGENTS)}
                 for _a in REDIS_AGENTS:
@@ -144,6 +146,20 @@ def _run_redis_instance(instance_cfg):
                     fallback_map[f'{_a}_target'] = request.get('rsu_id', env.rsu_ids[0])
                 pipe.hset(f"task:{request['task_id']}:decisions", mapping=fallback_map)
                 pipe.expire(f"task:{request['task_id']}:decisions", 300)
+                pipe.hset(
+                    f"task:{request['task_id']}:decision",
+                    mapping={
+                        'agent': 'ddqn',
+                        'type': 'RSU',
+                        'target': request.get('rsu_id', env.rsu_ids[0]),
+                        'drl_instance_id': iid,
+                        'rsu_id': rsu_id,
+                        'drl_dequeued_wall_s': dequeued_wall_s,
+                        'drl_state_ready_wall_s': now_wall_s,
+                        'drl_decision_written_wall_s': now_wall_s,
+                    },
+                )
+                pipe.expire(f"task:{request['task_id']}:decision", 300)
                 pipe.execute()
                 print(f"[DRL-{iid}] Task {request['task_id']}: vehicle state missing — fallback RSU decision written")
                 continue
@@ -158,7 +174,15 @@ def _run_redis_instance(instance_cfg):
                 'least_queue': least_queue_agent.select_action(env.candidates, env.rsus, mask),
             }
 
-            agent_decisions = env.write_decisions(request['task_id'], actions)
+            decision_written_wall_s = time.time()
+            trace_metadata = {
+                'drl_instance_id': iid,
+                'rsu_id': rsu_id,
+                'drl_dequeued_wall_s': dequeued_wall_s,
+                'drl_state_ready_wall_s': decision_written_wall_s,
+                'drl_decision_written_wall_s': decision_written_wall_s,
+            }
+            agent_decisions = env.write_decisions(request['task_id'], actions, trace_metadata=trace_metadata)
             pending[request['task_id']] = {
                 'state':           state,
                 'actions':         actions,
@@ -174,6 +198,14 @@ def _run_redis_instance(instance_cfg):
         _now = time.time()
         for task_id in list(pending.keys()):
             if _now - pending[task_id]['timestamp'] > TIMEOUT:
+                env.r.hset(
+                    f"task:{task_id}:decision",
+                    mapping={
+                        'drl_result_timeout_discard_wall_s': _now,
+                        'drl_result_timeout_s': TIMEOUT,
+                    },
+                )
+                env.r.expire(f"task:{task_id}:decision", 300)
                 print(f"[DRL-{iid}] Task {task_id} timed out — discarding")
                 pending.pop(task_id)
                 timeout_count += 1
