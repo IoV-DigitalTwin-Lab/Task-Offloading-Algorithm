@@ -91,8 +91,10 @@ def _rolling_mean(data, key, window=50):
 def _create_agent(agent_name, load_path=None):
     if agent_name == 'ddqn':
         agent = DDQNAgent()
+        initial_ep = 0
         if load_path:
-            agent.load_model(load_path)
+            initial_ep = agent.load_model(load_path) or 0
+        agent.global_step = initial_ep
         return agent
     elif agent_name == 'vanilla_dqn':
         return VanillaDQNAgent()
@@ -186,7 +188,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     fail_counts = defaultdict(int)  # cumulative; used in JSON results
 
     pending            = {}   # task_id → {state, action, decision_type, target, task_request, task_type, timestamp}
-    episode            = 0    # total tasks processed
+    episode            = getattr(agent, 'global_step', 0)    # total tasks processed
     completions_since_train = 0
     timeout_count      = 0
     total_tasks        = 0
@@ -363,7 +365,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                       f"pending={len(pending)} timeout={timeout_count}")
                 if ddqn_agent is not None and offload_rewards and episode > 500:
                     avg_r = _running_mean(offload_rewards)
-                    ddqn_agent.save_model(model_path)
+                    ddqn_agent.save_model(model_path, global_step=episode)
                     print(f"  >> [{agent_name}-{iid}] Model saved | avg_reward={avg_r:.3f}")
 
             # ── Idle sleep ────────────────────────────────────────────────────
@@ -383,7 +385,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
     # ── Save final model (ddqn) ───────────────────────────────────────────────
     if ddqn_agent is not None and offload_rewards:
-        ddqn_agent.save_model(model_path)
+        ddqn_agent.save_model(model_path, global_step=episode)
         print(f"[{agent_name}-{iid}] Final model saved to {model_path}")
 
     # ── Save results JSON ─────────────────────────────────────────────────────
@@ -681,7 +683,7 @@ def run():
             print(f"[{ts}] Ep {episode} | DDQN: {avg_ddqn:.2f} | Eps: {ddqn_agent.epsilon:.2f}")
             if avg_ddqn > best_avg_reward and episode > 1000:
                 best_avg_reward = avg_ddqn
-                ddqn_agent.save_model(Config.MODEL_SAVE_PATH)
+                ddqn_agent.save_model(Config.MODEL_SAVE_PATH, global_step=episode)
                 print(f"  >> New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
 
     writer.close()
