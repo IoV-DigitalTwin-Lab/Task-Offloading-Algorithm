@@ -65,8 +65,8 @@ class Config:
     REDIS_POLL_INTERVAL  = 0.05
     REDIS_RESULT_TIMEOUT = 30.0
     REDIS_TASK_FIELDS    = ["mem_footprint_mb", "cpu_req_mcycles", "deadline_s", "qos"]
-    REDIS_RSU_FIELDS     = ["cpu_available", "memory_available", "queue_length", "cpu_utilization"]
-    REDIS_VEHICLE_FIELDS = ["cpu_available", "mem_available", "cpu_utilization",
+    REDIS_RSU_FIELDS     = ["cpu_available", "memory_available", "queue_length"]
+    REDIS_VEHICLE_FIELDS = ["cpu_available", "mem_available",
                             "mem_utilization", "queue_length", "speed", "heading",
                             "acceleration", "distance_to_origin"]
     REDIS_NORMALIZATION  = {}

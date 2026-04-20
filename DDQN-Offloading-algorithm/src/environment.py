@@ -932,7 +932,14 @@ class IoVRedisEnv:
             "type":   decision_type,
             "target": target_id,
         })
+        # Write to the plural format that C++ (MyRSUApp) expects!
+        pipe.hset(f"task:{task_id}:decisions", mapping={
+            "agents": agent_name,
+            f"{agent_name}_type": decision_type,
+            f"{agent_name}_target": target_id,
+        })
         pipe.expire(f"task:{task_id}:decision", 300)
+        pipe.expire(f"task:{task_id}:decisions", 300)
         pipe.execute()
         return {"type": decision_type, "target": target_id}
 
@@ -953,11 +960,19 @@ class IoVRedisEnv:
         ready = {}
         for tid, data in zip(task_ids, all_data):
             if data and "status" in data:
+                # Check if there is an agent-specific overwrite (e.g., from DDQN_PENALTY)
+                final_status = data.get("ddqn_status", data["status"])
+                final_reason = data.get("ddqn_reason", data.get("reason", "UNKNOWN"))
+                
+                # If it fell back, ddqn_latency might be forced artificially high in C++
+                final_lat = float(data.get("ddqn_latency", data.get("latency", 999.0)))
+                final_ene = float(data.get("ddqn_energy", data.get("energy", 0.0)))
+                
                 ready[tid] = {
-                    "status":  data["status"],
-                    "latency": float(data.get("latency", 999.0)),
-                    "energy":  float(data.get("energy",  0.0)),
-                    "reason":  data.get("reason", "UNKNOWN"),
+                    "status":  final_status,
+                    "latency": final_lat,
+                    "energy":  final_ene,
+                    "reason":  final_reason,
                 }
         return ready
 

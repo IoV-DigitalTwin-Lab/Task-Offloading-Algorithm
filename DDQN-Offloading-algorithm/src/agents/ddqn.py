@@ -1,3 +1,4 @@
+import os
 """
 DDQNAgent — Deep Dueling Double Q-Network with Prioritized Experience Replay.
 
@@ -167,5 +168,29 @@ class DDQNAgent:
                 Config.TAU * local_param.data + (1.0 - Config.TAU) * target_param.data
             )
 
-    def save_model(self, path):
-        torch.save(self.policy_net.state_dict(), path)
+    def save_model(self, path, global_step=0):
+        checkpoint = {
+            'model_state_dict': self.policy_net.state_dict(),
+            'epsilon': self.epsilon,
+            'global_step': global_step
+        }
+        torch.save(checkpoint, path)
+
+    def load_model(self, path):
+        if os.path.exists(path):
+            checkpoint = torch.load(path, map_location=Config.DEVICE)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                self.policy_net.load_state_dict(checkpoint['model_state_dict'])
+                self.target_net.load_state_dict(self.policy_net.state_dict())
+                self.epsilon = checkpoint.get('epsilon', self.epsilon)
+                step = checkpoint.get('global_step', 0)
+                print(f"[DDQNAgent] Loaded checkpoint from {path} (Step: {step}, Epsilon: {self.epsilon:.3f})")
+                return step
+            else:
+                self.policy_net.load_state_dict(checkpoint)
+                self.target_net.load_state_dict(self.policy_net.state_dict())
+                print(f"[DDQNAgent] Loaded legacy model from {path}")
+                return 0
+        else:
+            print(f"[DDQNAgent] Model file not found at {path}, starting fresh.")
+            return 0

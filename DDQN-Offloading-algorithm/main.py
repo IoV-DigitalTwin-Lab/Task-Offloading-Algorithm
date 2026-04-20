@@ -88,9 +88,14 @@ def _rolling_mean(data, key, window=50):
 # Agent factory
 # ---------------------------------------------------------------------------
 
-def _create_agent(agent_name):
+def _create_agent(agent_name, load_path=None):
     if agent_name == 'ddqn':
-        return DDQNAgent()
+        agent = DDQNAgent()
+        initial_ep = 0
+        if load_path:
+            initial_ep = agent.load_model(load_path) or 0
+        agent.global_step = initial_ep
+        return agent
     elif agent_name == 'vanilla_dqn':
         return VanillaDQNAgent()
     elif agent_name == 'random':
@@ -125,7 +130,7 @@ def _select_action(agent, agent_name, state, mask, env, request):
 # Single-agent Redis training loop
 # ---------------------------------------------------------------------------
 
-def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_event=None):
+def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_event=None, load_path=None, resume_training=False):
     """
     Single-agent training/evaluation loop for one RSU instance.
 
@@ -154,7 +159,13 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
     writer = SummaryWriter(log_dir=log_dir)
     env    = IoVRedisEnv(redis_db=redis_db, instance_id=iid)
-    agent  = _create_agent(agent_name)
+    if resume_training and not load_path:
+        default_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
+        if os.path.exists(default_path):
+            load_path = default_path
+            print(f"[MAIN-{iid}] Auto-resuming from {load_path}")
+    
+    agent  = _create_agent(agent_name, load_path=load_path)
 
     # DRL-agent reference for training (None for heuristic baselines)
     ddqn_agent = agent if agent_name in ('ddqn', 'vanilla_dqn') else None
@@ -183,7 +194,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     fail_counts = defaultdict(int)  # cumulative; used in JSON results
 
     pending            = {}   # task_id → {state, action, decision_type, target, task_request, task_type, timestamp}
-    episode            = 0    # total tasks processed
+    episode            = getattr(agent, 'global_step', 0)    # total tasks processed
     completions_since_train = 0
     timeout_count      = 0
     total_tasks        = 0
@@ -360,7 +371,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                       f"pending={len(pending)} timeout={timeout_count}")
                 if ddqn_agent is not None and offload_rewards and episode > 500:
                     avg_r = _running_mean(offload_rewards)
-                    ddqn_agent.save_model(model_path)
+                    ddqn_agent.save_model(model_path, global_step=episode)
                     print(f"  >> [{agent_name}-{iid}] Model saved | avg_reward={avg_r:.3f}")
 
             # ── Idle sleep ────────────────────────────────────────────────────
@@ -380,7 +391,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
     # ── Save final model (ddqn) ───────────────────────────────────────────────
     if ddqn_agent is not None and offload_rewards:
-        ddqn_agent.save_model(model_path)
+        ddqn_agent.save_model(model_path, global_step=episode)
         print(f"[{agent_name}-{iid}] Final model saved to {model_path}")
 
     # ── Save results JSON ─────────────────────────────────────────────────────
@@ -498,6 +509,10 @@ def run():
                         choices=['ddqn', 'vanilla_dqn', 'random', 'greedy_compute',
                                  'min_latency', 'least_queue', 'greedy_distance', 'local'],
                         help='Agent type (required for --env redis)')
+    parser.add_argument('--load_model', type=str, default=None,
+                        help='Path to a saved model to resume training from.')
+    parser.add_argument('--resume_training', action='store_true',
+                        help='Resume training automatically checking models folder.')
     args = parser.parse_args()
 
     if args.env == 'redis':
@@ -532,7 +547,7 @@ def run():
                     stop_event.set()
             signal.signal(signal.SIGINT, _request_shutdown_single)
             signal.signal(signal.SIGTERM, _request_shutdown_single)
-            _run_single_agent_instance(active[0], args.agent, offload_mode, stop_event=stop_event)
+            _run_single_agent_instance(active[0], args.agent, offload_mode, stop_event=stop_event, load_path=args.load_model, resume_training=args.resume_training)
         else:
             stop_event = threading.Event()
             def _request_shutdown(signum, _frame):
@@ -544,7 +559,7 @@ def run():
             threads = [
                 threading.Thread(
                     target=_run_single_agent_instance,
-                    args=(inst, args.agent, offload_mode, stop_event),
+                    args=(inst, args.agent, offload_mode, stop_event, args.load_model, args.resume_training),
                     daemon=False
                 )
                 for inst in active
@@ -676,7 +691,7 @@ def run():
             print(f"[{ts}] Ep {episode} | DDQN: {avg_ddqn:.2f} | Eps: {ddqn_agent.epsilon:.2f}")
             if avg_ddqn > best_avg_reward and episode > 1000:
                 best_avg_reward = avg_ddqn
-                ddqn_agent.save_model(Config.MODEL_SAVE_PATH)
+                ddqn_agent.save_model(Config.MODEL_SAVE_PATH, global_step=episode)
                 print(f"  >> New Best Model Saved! Avg Reward: {best_avg_reward:.2f}")
 
     writer.close()
