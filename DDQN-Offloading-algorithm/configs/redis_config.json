@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/ddqn_7200_healthcheck_20260418_084146"
+        "log_dir": "output/ddqn_7200_healthcheck_20260420_062754"
     },
     "rewards": {
         "reward_success": 15,
@@ -56,7 +56,7 @@
                 "instance_id": 2,
                 "rsu_id": "RSU_2",
                 "redis_db": 2,
-                "active": false
+                "active": true
             }
         ],
         "state_columns": {

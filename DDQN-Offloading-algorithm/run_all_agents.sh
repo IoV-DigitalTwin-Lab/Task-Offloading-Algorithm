@@ -69,7 +69,7 @@ COMPARE_METRICS=(reward latency energy success_rate qos failure)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRL_DIR="${SCRIPT_DIR}"
-SIM_DIR="/opt/omnet/omnetpp-6.1/workspace3/IoV-Digital-Twin-TaskOffloading"
+SIM_DIR="/opt/omnet/omnetpp-6.1/workspace2/IoV-Digital-Twin-TaskOffloading"
 REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 
 DRL_LOG_DIR="${DRL_DIR}/logs/${RUN_LABEL}"

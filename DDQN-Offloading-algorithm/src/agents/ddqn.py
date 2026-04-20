@@ -169,3 +169,11 @@ class DDQNAgent:
 
     def save_model(self, path):
         torch.save(self.policy_net.state_dict(), path)
+
+    def load_model(self, path):
+        if os.path.exists(path):
+            self.policy_net.load_state_dict(torch.load(path))
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+            print(f"[DDQNAgent] Successfully loaded model from {path}")
+        else:
+            print(f"[DDQNAgent] Model file not found at {path}, starting fresh.")

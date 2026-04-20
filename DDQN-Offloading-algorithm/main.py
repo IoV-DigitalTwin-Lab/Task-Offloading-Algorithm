@@ -88,9 +88,12 @@ def _rolling_mean(data, key, window=50):
 # Agent factory
 # ---------------------------------------------------------------------------
 
-def _create_agent(agent_name):
+def _create_agent(agent_name, load_path=None):
     if agent_name == 'ddqn':
-        return DDQNAgent()
+        agent = DDQNAgent()
+        if load_path:
+            agent.load_model(load_path)
+        return agent
     elif agent_name == 'vanilla_dqn':
         return VanillaDQNAgent()
     elif agent_name == 'random':
@@ -125,7 +128,7 @@ def _select_action(agent, agent_name, state, mask, env, request):
 # Single-agent Redis training loop
 # ---------------------------------------------------------------------------
 
-def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_event=None):
+def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_event=None, load_path=None):
     """
     Single-agent training/evaluation loop for one RSU instance.
 
@@ -154,7 +157,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
     writer = SummaryWriter(log_dir=log_dir)
     env    = IoVRedisEnv(redis_db=redis_db, instance_id=iid)
-    agent  = _create_agent(agent_name)
+    agent  = _create_agent(agent_name, load_path=load_path)
 
     # DRL-agent reference for training (None for heuristic baselines)
     ddqn_agent = agent if agent_name in ('ddqn', 'vanilla_dqn') else None
@@ -498,6 +501,8 @@ def run():
                         choices=['ddqn', 'vanilla_dqn', 'random', 'greedy_compute',
                                  'min_latency', 'least_queue', 'greedy_distance', 'local'],
                         help='Agent type (required for --env redis)')
+    parser.add_argument('--load_model', type=str, default=None,
+                        help='Path to a saved model to resume training from.')
     args = parser.parse_args()
 
     if args.env == 'redis':
@@ -532,7 +537,7 @@ def run():
                     stop_event.set()
             signal.signal(signal.SIGINT, _request_shutdown_single)
             signal.signal(signal.SIGTERM, _request_shutdown_single)
-            _run_single_agent_instance(active[0], args.agent, offload_mode, stop_event=stop_event)
+            _run_single_agent_instance(active[0], args.agent, offload_mode, stop_event=stop_event, load_path=args.load_model)
         else:
             stop_event = threading.Event()
             def _request_shutdown(signum, _frame):
@@ -544,7 +549,7 @@ def run():
             threads = [
                 threading.Thread(
                     target=_run_single_agent_instance,
-                    args=(inst, args.agent, offload_mode, stop_event),
+                    args=(inst, args.agent, offload_mode, stop_event, args.load_model),
                     daemon=False
                 )
                 for inst in active
