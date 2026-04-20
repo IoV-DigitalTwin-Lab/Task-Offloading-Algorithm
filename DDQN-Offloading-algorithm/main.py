@@ -130,7 +130,7 @@ def _select_action(agent, agent_name, state, mask, env, request):
 # Single-agent Redis training loop
 # ---------------------------------------------------------------------------
 
-def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_event=None, load_path=None):
+def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_event=None, load_path=None, resume_training=False):
     """
     Single-agent training/evaluation loop for one RSU instance.
 
@@ -159,6 +159,12 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
     writer = SummaryWriter(log_dir=log_dir)
     env    = IoVRedisEnv(redis_db=redis_db, instance_id=iid)
+    if resume_training and not load_path:
+        default_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
+        if os.path.exists(default_path):
+            load_path = default_path
+            print(f"[MAIN-{iid}] Auto-resuming from {load_path}")
+    
     agent  = _create_agent(agent_name, load_path=load_path)
 
     # DRL-agent reference for training (None for heuristic baselines)
@@ -505,6 +511,8 @@ def run():
                         help='Agent type (required for --env redis)')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to a saved model to resume training from.')
+    parser.add_argument('--resume_training', action='store_true',
+                        help='Resume training automatically checking models folder.')
     args = parser.parse_args()
 
     if args.env == 'redis':
@@ -539,7 +547,7 @@ def run():
                     stop_event.set()
             signal.signal(signal.SIGINT, _request_shutdown_single)
             signal.signal(signal.SIGTERM, _request_shutdown_single)
-            _run_single_agent_instance(active[0], args.agent, offload_mode, stop_event=stop_event, load_path=args.load_model)
+            _run_single_agent_instance(active[0], args.agent, offload_mode, stop_event=stop_event, load_path=args.load_model, resume_training=args.resume_training)
         else:
             stop_event = threading.Event()
             def _request_shutdown(signum, _frame):
@@ -551,7 +559,7 @@ def run():
             threads = [
                 threading.Thread(
                     target=_run_single_agent_instance,
-                    args=(inst, args.agent, offload_mode, stop_event, args.load_model),
+                    args=(inst, args.agent, offload_mode, stop_event, args.load_model, args.resume_training),
                     daemon=False
                 )
                 for inst in active

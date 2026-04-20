@@ -70,10 +70,19 @@ if ! kill -0 "${SIM_PID}" 2>/dev/null; then
   exit 1
 fi
 
+# Look for an existing model checkpoint to resume training
+if ls "${DRL_DIR}"/models/ddqn_rsu*.pth >/dev/null 2>&1; then
+  echo "[INFO] Found existing model checkpoints. Resuming training independently for each RSU."
+  DRL_LOAD_FLAG="--resume_training"
+else
+  echo "[INFO] No existing model checkpoint found. Starting fresh."
+  DRL_LOAD_FLAG=""
+fi
+
 echo "[INFO] Starting DDQN agent -> ${DRL_LOG}"
 (
   cd "${DRL_DIR}"
-  exec python3 -u main.py --env redis --agent ddqn > "${DRL_LOG}" 2>&1
+  exec python3 -u main.py --env redis --agent ddqn ${DRL_LOAD_FLAG} > "${DRL_LOG}" 2>&1
 ) &
 DRL_PID=$!
 echo "[OK] DRL PID=${DRL_PID}"
