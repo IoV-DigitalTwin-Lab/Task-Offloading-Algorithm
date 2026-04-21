@@ -48,6 +48,9 @@ RUNS=(
     "least_queue:Heuristic"
     "greedy_distance:Heuristic"
     "local:AllLocal"
+    "ddqn_attention:AllOffload"
+    "ppo:AllOffload"
+    "sv_attention_ppo:AllOffload"
 )
 
 # ── Redis databases to flush before each run ─────────────────────────────────

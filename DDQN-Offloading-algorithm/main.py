@@ -16,6 +16,7 @@ from src.agents import (
     DDQNAgent, VanillaDQNAgent,
     RandomAgent, GreedyComputeAgent, MinLatencyAgent,
     LeastQueueAgent, GreedyDistanceAgent, LocalAgent,
+    DDQNAttentionAgent, PPOAgent, SVAttentionPPOAgent,
 )
 from src.config import Config
 
@@ -110,13 +111,34 @@ def _create_agent(agent_name, load_path=None):
         return GreedyDistanceAgent()
     elif agent_name == 'local':
         return LocalAgent()
+    elif agent_name == 'ddqn_attention':
+        agent = DDQNAttentionAgent()
+        initial_ep = 0
+        if load_path:
+            initial_ep = agent.load_model(load_path) or 0
+        agent.global_step = initial_ep
+        return agent
+    elif agent_name == 'ppo':
+        agent = PPOAgent()
+        initial_ep = 0
+        if load_path:
+            initial_ep = agent.load_model(load_path) or 0
+        agent.global_step = initial_ep
+        return agent
+    elif agent_name == 'sv_attention_ppo':
+        agent = SVAttentionPPOAgent()
+        initial_ep = 0
+        if load_path:
+            initial_ep = agent.load_model(load_path) or 0
+        agent.global_step = initial_ep
+        return agent
     else:
         raise ValueError(f"Unknown agent: {agent_name}")
 
 
 def _select_action(agent, agent_name, state, mask, env, request):
     """Dispatch select_action for different agent interfaces."""
-    if agent_name in ('ddqn', 'vanilla_dqn'):
+    if agent_name in ('ddqn', 'vanilla_dqn', 'ddqn_attention', 'ppo', 'sv_attention_ppo'):
         return agent.select_action(state, mask=mask)
     elif agent_name == 'random':
         return agent.select_action(mask)
@@ -152,7 +174,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     rsu_id   = instance_cfg['rsu_id']
 
     log_dir    = os.path.join(Config.LOG_DIR, f"{agent_name}_{offload_mode}", f"instance_{iid}")
-    model_path = os.path.join(Config.BASE_DIR, "models", f"ddqn_rsu{iid}.pth")
+    model_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     os.makedirs(os.path.join(Config.BASE_DIR, "results"), exist_ok=True)
@@ -167,8 +189,10 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     
     agent  = _create_agent(agent_name, load_path=load_path)
 
-    # DRL-agent reference for training (None for heuristic baselines)
-    ddqn_agent = agent if agent_name in ('ddqn', 'vanilla_dqn') else None
+    # DRL-agent reference for training (None for heuristic/local baselines)
+    ddqn_agent = agent if agent_name in (
+        'ddqn', 'vanilla_dqn', 'ddqn_attention', 'ppo', 'sv_attention_ppo'
+    ) else None
 
     TIMEOUT             = Config.REDIS_RESULT_TIMEOUT
     TRAIN_EVERY         = 4
@@ -507,7 +531,8 @@ def run():
                         help='Environment type: dummy or redis')
     parser.add_argument('--agent', type=str, default=None,
                         choices=['ddqn', 'vanilla_dqn', 'random', 'greedy_compute',
-                                 'min_latency', 'least_queue', 'greedy_distance', 'local'],
+                                 'min_latency', 'least_queue', 'greedy_distance', 'local',
+                                 'ddqn_attention', 'ppo', 'sv_attention_ppo'],
                         help='Agent type (required for --env redis)')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to a saved model to resume training from.')

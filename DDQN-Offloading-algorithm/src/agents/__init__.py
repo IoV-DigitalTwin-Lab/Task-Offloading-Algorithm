@@ -6,6 +6,9 @@ from .min_latency import MinLatencyAgent
 from .least_queue import LeastQueueAgent
 from .greedy_distance import GreedyDistanceAgent
 from .local_agent import LocalAgent
+from .ddqn_attention import DDQNAttentionAgent
+from .ppo import PPOAgent
+from .sv_attention_ppo import SVAttentionPPOAgent
 
 __all__ = [
     "DDQNAgent",
@@ -16,4 +19,7 @@ __all__ = [
     "LeastQueueAgent",
     "GreedyDistanceAgent",
     "LocalAgent",
+    "DDQNAttentionAgent",
+    "PPOAgent",
+    "SVAttentionPPOAgent",
 ]
