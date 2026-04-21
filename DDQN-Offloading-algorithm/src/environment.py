@@ -633,29 +633,61 @@ class IoVRedisEnv:
 
         return states
 
+    # Maximum V2V communication range in metres.
+    # Matches the ~178 m free-space threshold derived from PayloadVehicleApp's
+    # estimateV2vRssiDbm() at the -85 dBm sensitivity limit.  We use a slightly
+    # larger value (250 m) to give the agent a small safety margin for vehicles
+    # that are momentarily near the boundary.
+    MAX_SV_DISTANCE_M = 250.0
+
+    # Maximum V2V communication range in metres.
+    # Matches the ~178 m free-space threshold derived from PayloadVehicleApp's
+    # estimateV2vRssiDbm() at the -85 dBm sensitivity limit.  We use a slightly
+    # larger value (250 m) to give the agent a small safety margin for vehicles
+    # that are momentarily near the boundary.
+    MAX_SV_DISTANCE_M = 250.0
+
     def _fetch_candidates(self, origin_id, origin_x, origin_y):
         """
-        Option A candidate selection:
-        1) Fetch available service vehicles from Redis.
-        2) Sort by distance to origin vehicle.
-        3) Keep only top-K closest.
-        4) Compute tau features ONLY for those K candidates.
+        Fetch service-vehicle candidates from the Redis sorted set.
+
+        Changes vs. original:
+        1. Fetch a much larger pool (50) so nearby SVs ranked lower by CPU
+           score are not silently excluded.
+        2. Prune stale entries whose vehicle:{id}:state key has expired.
+        3. Filter to only SVs within MAX_SV_DISTANCE_M of the origin vehicle.
+        4. Re-sort the survivors by distance and keep the MAX_NEIGHBORS closest.
         """
         top = self.r.zrevrange('service_vehicles:available', 0, -1, withscores=True)
         candidates, states = [], []
+        stale_ids = []
         for vehicle_id, _ in top:
             if vehicle_id == origin_id:
                 continue
             state = self._fetch_vehicle_state(vehicle_id)
-            if state:
-                state['distance_to_origin'] = math.sqrt(
-                    (state['pos_x'] - origin_x) ** 2 + (state['pos_y'] - origin_y) ** 2
-                )
+            if state is None:
+                # Vehicle state has expired — remove ghost entry from sorted set
+                stale_ids.append(vehicle_id)
+                continue
+            dist = math.sqrt(
+                (state['pos_x'] - origin_x) ** 2 + (state['pos_y'] - origin_y) ** 2
+            )
+            state['distance_to_origin'] = dist
+            # Only consider SVs within V2V communication range
+            if dist <= self.MAX_SV_DISTANCE_M:
                 candidates.append(vehicle_id)
                 states.append(state)
 
-        # Sort closest first and keep top-K only.
+        # Clean up stale sorted-set entries in one pipeline call
+        if stale_ids:
+            pipe = self.r.pipeline(transaction=False)
+            for sid in stale_ids:
+                pipe.zrem('service_vehicles:available', sid)
+            pipe.execute()
+
+        # Sort closest first, keep at most MAX_NEIGHBORS
         paired = sorted(zip(candidates, states), key=lambda x: x[1]['distance_to_origin'])
+        paired = paired[:Config.MAX_NEIGHBORS]
         if paired:
             paired = paired[:Config.MAX_NEIGHBORS]
             candidates, states = zip(*paired)
@@ -742,14 +774,15 @@ class IoVRedisEnv:
         )
         self.candidates = [
             types.SimpleNamespace(
-                vehicle_id   = s['vehicle_id'],
-                cpu_avail    = s.get('cpu_available', 0.0),
-                mem_avail    = s.get('mem_available', 0.0),
-                queue_length = s.get('queue_length', 0),
-                pos_x        = s.get('pos_x', 0.0),
-                pos_y        = s.get('pos_y', 0.0),
-                speed        = s.get('speed', 0.0),
-                heading      = s.get('heading', 0.0),
+                vehicle_id        = s['vehicle_id'],
+                cpu_avail         = s.get('cpu_available', 0.0),
+                mem_avail         = s.get('mem_available', 0.0),
+                queue_length      = s.get('queue_length', 0),
+                pos_x             = s.get('pos_x', 0.0),
+                pos_y             = s.get('pos_y', 0.0),
+                speed             = s.get('speed', 0.0),
+                heading           = s.get('heading', 0.0),
+                distance_to_origin= s.get('distance_to_origin', 9999.0),
                 tau_up       = s.get('tau_up', 0.0),
                 tau_comp     = s.get('tau_comp', 0.0),
                 tau_down     = s.get('tau_down', 0.0),
@@ -772,9 +805,11 @@ class IoVRedisEnv:
             if float(self.rsu_states.get(rsu_id, {}).get('cpu_available', 0)) > 0:
                 mask[i] = 1.0
 
-        # Service-vehicle actions — valid for each present candidate
-        for j in range(len(self.candidates)):
-            mask[self.num_rsus + j] = 1.0
+        # Service-vehicle actions — valid only if candidate is within V2V range
+        for j, sv in enumerate(self.candidates):
+            dist = getattr(sv, 'distance_to_origin', 9999.0)
+            if dist <= self.MAX_SV_DISTANCE_M:
+                mask[self.num_rsus + j] = 1.0
 
         # Safety fallback: allow all RSUs if nothing else is valid
         if mask.sum() == 0:
@@ -913,6 +948,7 @@ class IoVRedisEnv:
             'input_size_bytes': input_size_bytes,
             'output_size_bytes': output_size_bytes,
             'cpu_cycles':       cpu_cycles,
+            'task_type':        data.get('task_type', 'UNKNOWN'),  # for per-type TensorBoard panels
         }
 
     def setup_from_request(self, request):
@@ -922,6 +958,7 @@ class IoVRedisEnv:
         Equivalent to reset() but works with an already-fetched request.
         """
         self.task_request = request
+        self.task_type = request.get("task_type", "UNKNOWN")  # for per-type TensorBoard metrics
         active_rsu_id     = request.get('rsu_id', self.rsu_ids[0])
 
         self.rsu_states = {rsu_id: self._fetch_rsu_state(rsu_id) for rsu_id in self.rsu_ids}
@@ -948,18 +985,19 @@ class IoVRedisEnv:
         )
         self.candidates = [
             types.SimpleNamespace(
-                vehicle_id   = s['vehicle_id'],
-                cpu_avail    = s.get('cpu_available', 0.0),
-                mem_avail    = s.get('mem_available', 0.0),
-                queue_length = s.get('queue_length', 0),
-                pos_x        = s.get('pos_x', 0.0),
-                pos_y        = s.get('pos_y', 0.0),
-                speed        = s.get('speed', 0.0),
-                heading      = s.get('heading', 0.0),
+                vehicle_id        = s['vehicle_id'],
+                cpu_avail         = s.get('cpu_available', 0.0),
+                mem_avail         = s.get('mem_available', 0.0),
+                queue_length      = s.get('queue_length', 0),
+                pos_x             = s.get('pos_x', 0.0),
+                pos_y             = s.get('pos_y', 0.0),
+                speed             = s.get('speed', 0.0),
+                heading           = s.get('heading', 0.0),
                 tau_up       = s.get('tau_up', 0.0),
                 tau_comp     = s.get('tau_comp', 0.0),
                 tau_down     = s.get('tau_down', 0.0),
                 tau_total    = s.get('tau_total', 0.0),
+                distance_to_origin= s.get('distance_to_origin', 9999.0),
             )
             for s in self.candidate_states
         ]
@@ -1163,9 +1201,10 @@ class IoVRedisEnv:
         Standalone reward calculation given a stored task_request dict and an agent's result.
         Used by the async loop so it can compute rewards for any pending task independent
         of the current self.task_request state.
+        result keys (from batch_check_single_results): status, latency, energy, reason
         """
         success = result['status'] == 'COMPLETED_ON_TIME'
-        latency = result['total_latency']
+        latency = result['latency']   # key written by writeSingleResult → batch_check_single_results
         energy  = result['energy']
 
         if success:
@@ -1181,10 +1220,98 @@ class IoVRedisEnv:
             'latency':       latency,
             'energy':        energy,
             'success':       1 if success else 0,
-            'fail_reason':   result.get('fail_reason', 'NONE' if success else 'UNKNOWN'),
+            'fail_reason':   result.get('reason', 'NONE' if success else 'UNKNOWN'),
             'decision_type': decision_type,
             'target_id':     target_id,
         }
+
+    # ── Single-agent API ──────────────────────────────────────────────────────
+
+    def write_decision(self, task_id: str, action: int, agent_name: str) -> dict:
+        """
+        Write a single-agent decision to task:{task_id}:decision.
+        Returns (decision_type, target_id) as a dict.
+        """
+        decision_type, target_id = self._action_to_target(action)
+        pipe = self.r.pipeline()
+        pipe.hset(f"task:{task_id}:decision", mapping={
+            "agent":  agent_name,
+            "type":   decision_type,
+            "target": target_id,
+        })
+        # Write to the plural format that C++ (MyRSUApp) expects!
+        pipe.hset(f"task:{task_id}:decisions", mapping={
+            "agents": agent_name,
+            f"{agent_name}_type": decision_type,
+            f"{agent_name}_target": target_id,
+        })
+        pipe.expire(f"task:{task_id}:decision", 300)
+        pipe.expire(f"task:{task_id}:decisions", 300)
+        pipe.execute()
+        return {"type": decision_type, "target": target_id}
+
+    def batch_check_single_results(self, pending: dict) -> dict:
+        """
+        Pipeline batch-read task:{id}:result for all pending task_ids.
+        Returns {task_id: result_dict} for tasks whose result has arrived.
+        result_dict keys: status, latency, energy, reason
+        pending: {task_id: any}
+        """
+        task_ids = list(pending.keys())
+        if not task_ids:
+            return {}
+        pipe = self.r.pipeline(transaction=False)
+        for tid in task_ids:
+            pipe.hgetall(f"task:{tid}:result")
+        all_data = pipe.execute()
+        ready = {}
+        for tid, data in zip(task_ids, all_data):
+            if data and "status" in data:
+                # Check if there is an agent-specific overwrite (e.g., from DDQN_PENALTY)
+                final_status = data.get("ddqn_status", data["status"])
+                final_reason = data.get("ddqn_reason", data.get("reason", "UNKNOWN"))
+                
+                # If it fell back, ddqn_latency might be forced artificially high in C++
+                final_lat = float(data.get("ddqn_latency", data.get("latency", 999.0)))
+                final_ene = float(data.get("ddqn_energy", data.get("energy", 0.0)))
+                
+                ready[tid] = {
+                    "status":  final_status,
+                    "latency": final_lat,
+                    "energy":  final_ene,
+                    "reason":  final_reason,
+                }
+        return ready
+
+    def poll_local_result(self):
+        """
+        Non-blocking lpop from local_results:queue; fetches task:{id}:local_result.
+        Returns (task_id, result_dict) if available, else None.
+        result_dict keys: task_type, qos_value, deadline_s, status, latency, energy, reason
+        """
+        task_id = self.r.lpop("local_results:queue")
+        if not task_id:
+            return None
+        data = self.r.hgetall(f"task:{task_id}:local_result")
+        if not data:
+            return task_id, {}
+        return task_id, {
+            "task_type": data.get("task_type", "UNKNOWN"),
+            "qos_value": float(data.get("qos_value", 0.0)),
+            "deadline_s": float(data.get("deadline_s", 0.0)),
+            "status":    data.get("status",  "FAILED"),
+            "latency":   float(data.get("latency", 999.0)),
+            "energy":    float(data.get("energy",  0.0)),
+            "reason":    data.get("reason",  "UNKNOWN"),
+        }
+
+    def read_offload_mode(self) -> str:
+        """
+        Read sim:offload_mode written by the simulator at startup.
+        Returns one of "heuristic", "allOffload", "allLocal", or "unknown".
+        """
+        val = self.r.get("sim:offload_mode")
+        return val if val else "unknown"
 
     def close(self):
         self.r.close()

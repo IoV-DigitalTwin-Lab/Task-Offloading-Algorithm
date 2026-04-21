@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/runs"
+        "log_dir": "output/ddqn_7200_healthcheck_20260420_062754"
     },
     "rewards": {
         "reward_success": 15,
@@ -41,11 +41,30 @@
         "link_rate_efficiency": 0.8,
         "task_output_ratio": 0.25,
         "tau_missing_penalty_s": 5.0,
-        "rsu_ids": ["RSU_0", "RSU_1", "RSU_2"],
-        "drl_instances": [
-            {"instance_id": 0, "rsu_id": "RSU_0", "redis_db": 0, "active": true},
-            {"instance_id": 1, "rsu_id": "RSU_1", "redis_db": 1, "active": true},
-            {"instance_id": 2, "rsu_id": "RSU_2", "redis_db": 2, "active": true}
+        "rsu_ids": [
+            "RSU_0",
+            "RSU_1",
+            "RSU_2"
+        ],
+        "agent_instances": [
+            {
+                "instance_id": 0,
+                "rsu_id": "RSU_0",
+                "redis_db": 0,
+                "active": true
+            },
+            {
+                "instance_id": 1,
+                "rsu_id": "RSU_1",
+                "redis_db": 1,
+                "active": true
+            },
+            {
+                "instance_id": 2,
+                "rsu_id": "RSU_2",
+                "redis_db": 2,
+                "active": true
+            }
         ],
         "state_columns": {
             "task": [
@@ -57,13 +76,11 @@
             "rsu": [
                 "cpu_available",
                 "memory_available",
-                "queue_length",
-                "cpu_utilization"
+                "queue_length"
             ],
             "vehicle": [
                 "cpu_available",
                 "mem_available",
-                "cpu_utilization",
                 "mem_utilization",
                 "queue_length",
                 "speed",
@@ -85,13 +102,11 @@
             "rsu": {
                 "cpu_available": 32.0,
                 "memory_available": 64.0,
-                "queue_length": 50.0,
-                "cpu_utilization": 1.0
+                "queue_length": 50.0
             },
             "vehicle": {
                 "cpu_available": 5000.0,
                 "mem_available": 4096.0,
-                "cpu_utilization": 1.0,
                 "mem_utilization": 1.0,
                 "queue_length": 10.0,
                 "speed": 25.0,
