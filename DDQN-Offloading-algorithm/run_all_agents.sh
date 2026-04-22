@@ -20,7 +20,7 @@
 #   • Results subdirectory:  results/<RUN_LABEL>/
 #   • TensorBoard subdirectory in configs/redis_config.json:
 #       system.log_dir = output/<RUN_LABEL>
-RUN_LABEL="test2_all_heuristic"
+RUN_LABEL="test1_all_heuristic"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
 SIM_TIME="7200s"
@@ -53,7 +53,7 @@ RUNS=(
 # ── Redis databases to flush before each run ─────────────────────────────────
 # Must match the "redis_db" values of active=true instances in
 # configs/redis_config.json  (currently: db 0, db 1)
-REDIS_DBS=(0 1)
+REDIS_DBS=(0 1 2)
 
 # ── compare.py settings ──────────────────────────────────────────────────────
 # Output image path (relative to the DRL project directory)
@@ -69,7 +69,7 @@ COMPARE_METRICS=(reward latency energy success_rate qos failure)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRL_DIR="${SCRIPT_DIR}"
-SIM_DIR="/opt/omnet/omnetpp-6.1/workspace2/IoV-Digital-Twin-TaskOffloading"
+SIM_DIR="/opt/omnet/omnetpp-6.1/workspace/IoV-Digital-Twin-TaskOffloading"
 REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 
 DRL_LOG_DIR="${DRL_DIR}/logs/${RUN_LABEL}"

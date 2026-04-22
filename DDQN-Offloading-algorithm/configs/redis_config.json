@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/ddqn_7200_healthcheck_20260420_062754"
+        "log_dir": "output/test1_all_heuristic"
     },
     "rewards": {
         "reward_success": 15,
