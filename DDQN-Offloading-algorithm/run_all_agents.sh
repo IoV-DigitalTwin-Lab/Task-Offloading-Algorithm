@@ -87,6 +87,10 @@ SIM_MIN_RUNTIME=30
 # If it does not exit within this window it is force-killed.
 DRL_SHUTDOWN_TIMEOUT=30
 
+# Seconds to wait for the secondary DT wrapper to stop after SIGINT before
+# escalating to SIGTERM and, if required, SIGKILL.
+SECONDARY_SHUTDOWN_TIMEOUT=20
+
 # =============================================================================
 # IMPLEMENTATION
 # =============================================================================
@@ -226,9 +230,29 @@ _stop_secondary_dt() {
     if [ -z "${_SECONDARY_PID}" ]; then
         return 0
     fi
+
     if kill -0 "${_SECONDARY_PID}" 2>/dev/null; then
-        _info "Stopping secondary DT (PID: ${_SECONDARY_PID})"
+        _info "Stopping secondary DT (PID: ${_SECONDARY_PID}) with up to ${SECONDARY_SHUTDOWN_TIMEOUT}s for clean shutdown..."
         kill -SIGINT "${_SECONDARY_PID}" 2>/dev/null || true
+
+        local elapsed=0
+        while kill -0 "${_SECONDARY_PID}" 2>/dev/null && [ "${elapsed}" -lt "${SECONDARY_SHUTDOWN_TIMEOUT}" ]; do
+            sleep 1
+            (( elapsed++ )) || true
+        done
+
+        if kill -0 "${_SECONDARY_PID}" 2>/dev/null; then
+            _warn "Secondary DT did not stop within ${SECONDARY_SHUTDOWN_TIMEOUT}s — sending SIGTERM"
+            kill -SIGTERM "${_SECONDARY_PID}" 2>/dev/null || true
+            sleep 2
+        fi
+
+        if kill -0 "${_SECONDARY_PID}" 2>/dev/null; then
+            _warn "Secondary DT still running — force killing (SIGKILL)"
+            kill -9 "${_SECONDARY_PID}" 2>/dev/null || true
+            sleep 1
+        fi
+
         wait "${_SECONDARY_PID}" 2>/dev/null || true
     fi
     _SECONDARY_PID=""
