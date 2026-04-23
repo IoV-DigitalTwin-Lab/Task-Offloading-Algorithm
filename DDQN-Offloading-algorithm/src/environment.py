@@ -400,10 +400,10 @@ class IoVRedisEnv:
 
     # Maximum V2V communication range in metres.
     # Matches the ~178 m free-space threshold derived from PayloadVehicleApp's
-    # estimateV2vRssiDbm() at the -85 dBm sensitivity limit.  We use a slightly
-    # larger value (250 m) to give the agent a small safety margin for vehicles
-    # that are momentarily near the boundary.
-    MAX_SV_DISTANCE_M = 250.0
+    # estimateV2vRssiDbm() at the -85 dBm sensitivity limit. Keep the Python
+    # mask near the simulator's real V2V range so DDQN does not learn risky
+    # service-vehicle actions that later fail as SV_OUT_OF_RANGE/fallback.
+    MAX_SV_DISTANCE_M = 180.0
 
     def _fetch_candidates(self, origin_id, origin_x, origin_y):
         """

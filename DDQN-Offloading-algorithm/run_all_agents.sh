@@ -5,6 +5,8 @@
 #
 # Usage:
 #   ./run_all_agents.sh
+#   ./run_all_agents.sh ddqn random
+#   ./run_all_agents.sh ddqn,vanilla_dqn,greedy_distance
 #
 # Edit the USER CONFIGURATION section below before running.
 # =============================================================================
@@ -20,14 +22,14 @@
 #   • Results subdirectory:  results/<RUN_LABEL>/
 #   • TensorBoard subdirectory in configs/redis_config.json:
 #       system.log_dir = output/<RUN_LABEL>
-RUN_LABEL="test2_all_heuristic"
+RUN_LABEL="${RUN_LABEL:-new_all_heuristic}"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
 SIM_TIME="7200s"
 
 # Seconds to wait after starting the simulation before launching the DRL agent
 # (gives the simulator time to connect to Redis and write initial state)
-DRL_START_DELAY=2
+DRL_START_DELAY=4
 
 # ── Agents to run ────────────────────────────────────────────────────────────
 # Format: "agent_name:SimulationConfig"
@@ -50,10 +52,12 @@ RUNS=(
     "local:AllLocal"
 )
 
+SELECTED_AGENTS=("$@")
+
 # ── Redis databases to flush before each run ─────────────────────────────────
 # Must match the "redis_db" values of active=true instances in
-# configs/redis_config.json  (currently: db 0, db 1)
-REDIS_DBS=(0 1)
+# configs/redis_config.json  (currently: db 4, db 5, db 6)
+REDIS_DBS=(4 5 6)
 
 # ── compare.py settings ──────────────────────────────────────────────────────
 # Output image path (relative to the DRL project directory)
@@ -62,6 +66,13 @@ COMPARE_OUTPUT="output/comparison_${RUN_LABEL}.png"
 # Metrics to include in the comparison plot
 # Available: reward latency energy success_rate qos failure
 COMPARE_METRICS=(reward latency energy success_rate qos failure)
+
+# ── Target improvement values for presentation (reference lines in TensorBoard)
+# These are NOT used to alter measured metrics; they are logged as separate
+# target scalars so measured-vs-target is explicit.
+TARGET_LATENCY_IMPROVEMENT_PCT=23.6
+TARGET_ENERGY_IMPROVEMENT_PCT=17.3
+TARGET_SUCCESS_GAIN_PCT=7.0
 
 # =============================================================================
 # PATHS — usually no need to edit below this line
@@ -104,6 +115,64 @@ _error()   { echo -e "${C_RED}[ERROR]${C_RESET} $*"; }
 _section() { echo -e "\n${C_BOLD}══════════════════════════════════════════════${C_RESET}"; \
              echo -e "${C_BOLD}  $*${C_RESET}"; \
              echo -e "${C_BOLD}══════════════════════════════════════════════${C_RESET}"; }
+
+usage() {
+    cat <<EOF
+Usage:
+  ./run_all_agents.sh
+  ./run_all_agents.sh <agent> [agent...]
+  ./run_all_agents.sh <agent,agent,...>
+
+Agents:
+  ddqn vanilla_dqn random greedy_compute min_latency least_queue greedy_distance local
+
+Examples:
+  ./run_all_agents.sh ddqn
+  ./run_all_agents.sh ddqn random greedy_compute
+  ./run_all_agents.sh ddqn,vanilla_dqn,greedy_distance
+EOF
+}
+
+build_selected_runs() {
+    FILTERED_RUNS=()
+
+    if [ ${#SELECTED_AGENTS[@]} -eq 0 ]; then
+        FILTERED_RUNS=("${RUNS[@]}")
+        return 0
+    fi
+
+    local requested=()
+    local raw part
+    for raw in "${SELECTED_AGENTS[@]}"; do
+        raw="${raw//,/ }"
+        for part in ${raw}; do
+            [ -n "${part}" ] && requested+=("${part}")
+        done
+    done
+
+    if [ ${#requested[@]} -eq 0 ]; then
+        _error "No valid agent names were provided."
+        usage
+        return 1
+    fi
+
+    local agent entry run_agent found
+    for agent in "${requested[@]}"; do
+        found=0
+        for entry in "${RUNS[@]}"; do
+            run_agent="${entry%%:*}"
+            if [ "${run_agent}" = "${agent}" ]; then
+                FILTERED_RUNS+=("${entry}")
+                found=1
+            fi
+        done
+        if [ "${found}" -eq 0 ]; then
+            _error "Unknown agent: ${agent}"
+            usage
+            return 1
+        fi
+    done
+}
 
 # Active PIDs — used by the SIGINT trap for cleanup
 _SIM_PID=""
@@ -208,6 +277,314 @@ move_new_results() {
     fi
 }
 
+# ─── emit_tensorboard_improvement_summary ───────────────────────────────────
+# Compute DDQN improvement against baseline = average(random, greedy_compute)
+# from run result JSONs, then write measured and target scalars to TensorBoard.
+#   $@ = result JSON paths (typically inst0 files from this batch)
+emit_tensorboard_improvement_summary() {
+    local result_files=("$@")
+    local tb_out_dir="${DRL_DIR}/output/${RUN_LABEL}/comparison_summary"
+    local summary_txt="${RESULTS_SUBDIR}/improvement_summary_ddqn_vs_baselines.txt"
+
+    if [ ${#result_files[@]} -eq 0 ]; then
+        _warn "No result files passed for improvement summary; skipping TensorBoard summary"
+        return 0
+    fi
+
+    _info "Writing TensorBoard improvement summary (DDQN vs random+greedy_compute)"
+
+    if python3 - "${tb_out_dir}" "${summary_txt}" \
+        "${TARGET_LATENCY_IMPROVEMENT_PCT}" "${TARGET_ENERGY_IMPROVEMENT_PCT}" "${TARGET_SUCCESS_GAIN_PCT}" \
+        "${result_files[@]}" <<'PY'
+import json
+import math
+import os
+import sys
+
+from torch.utils.tensorboard import SummaryWriter
+
+
+def flatten_metric_dict(metric_dict):
+    vals = []
+    if not isinstance(metric_dict, dict):
+        return vals
+    for arr in metric_dict.values():
+        if isinstance(arr, list):
+            vals.extend(x for x in arr if isinstance(x, (int, float)) and math.isfinite(x))
+    return vals
+
+
+def mean(xs):
+    return (sum(xs) / len(xs)) if xs else float("nan")
+
+
+tb_out_dir = sys.argv[1]
+summary_txt = sys.argv[2]
+target_latency = float(sys.argv[3])
+target_energy = float(sys.argv[4])
+target_success = float(sys.argv[5])
+paths = sys.argv[6:]
+
+agents = {
+    "ddqn": {"lat": [], "en": [], "sr": []},
+    "random": {"lat": [], "en": [], "sr": []},
+    "greedy_compute": {"lat": [], "en": [], "sr": []},
+}
+
+for p in paths:
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        continue
+
+    agent = data.get("agent")
+    if agent not in agents:
+        continue
+
+    metrics = data.get("metrics", {})
+    agents[agent]["lat"].extend(flatten_metric_dict(metrics.get("latencies", {})))
+    agents[agent]["en"].extend(flatten_metric_dict(metrics.get("energies", {})))
+    agents[agent]["sr"].extend(
+        x for x in metrics.get("success_rates", [])
+        if isinstance(x, (int, float)) and math.isfinite(x)
+    )
+
+missing = [a for a in agents if len(agents[a]["sr"]) == 0]
+if missing:
+    raise RuntimeError(f"Missing required agents/metrics for summary: {missing}")
+
+ddqn_lat = mean(agents["ddqn"]["lat"])
+ddqn_en = mean(agents["ddqn"]["en"])
+ddqn_sr = mean(agents["ddqn"]["sr"])
+
+base_lat = mean(agents["random"]["lat"] + agents["greedy_compute"]["lat"])
+base_en = mean(agents["random"]["en"] + agents["greedy_compute"]["en"])
+base_sr = mean(agents["random"]["sr"] + agents["greedy_compute"]["sr"])
+
+latency_impr_pct = ((base_lat - ddqn_lat) / base_lat * 100.0) if base_lat > 0 else float("nan")
+energy_impr_pct = ((base_en - ddqn_en) / base_en * 100.0) if base_en > 0 else float("nan")
+success_gain_pp = ddqn_sr - base_sr
+success_gain_rel_pct = ((ddqn_sr - base_sr) / base_sr * 100.0) if base_sr > 0 else float("nan")
+
+os.makedirs(tb_out_dir, exist_ok=True)
+writer = SummaryWriter(log_dir=tb_out_dir)
+step = 0
+
+# Measured values
+writer.add_scalar("Improvement/Latency_Reduction_Pct_Measured", latency_impr_pct, step)
+writer.add_scalar("Improvement/Energy_Reduction_Pct_Measured", energy_impr_pct, step)
+writer.add_scalar("Improvement/TaskSuccess_Gain_PctPoints_Measured", success_gain_pp, step)
+writer.add_scalar("Improvement/TaskSuccess_Gain_RelativePct_Measured", success_gain_rel_pct, step)
+
+# Targets (reference lines)
+writer.add_scalar("Improvement/Latency_Reduction_Pct_Target", target_latency, step)
+writer.add_scalar("Improvement/Energy_Reduction_Pct_Target", target_energy, step)
+writer.add_scalar("Improvement/TaskSuccess_Gain_PctPoints_Target", target_success, step)
+
+# Raw means for transparency
+writer.add_scalar("Means/DDQN_Latency", ddqn_lat, step)
+writer.add_scalar("Means/Baseline_Latency", base_lat, step)
+writer.add_scalar("Means/DDQN_Energy", ddqn_en, step)
+writer.add_scalar("Means/Baseline_Energy", base_en, step)
+writer.add_scalar("Means/DDQN_SuccessRate", ddqn_sr, step)
+writer.add_scalar("Means/Baseline_SuccessRate", base_sr, step)
+
+writer.close()
+
+with open(summary_txt, "w", encoding="utf-8") as f:
+    f.write("DDQN vs Baseline (random + greedy_compute)\n")
+    f.write("Baseline is the combined mean over random and greedy_compute samples.\n\n")
+    f.write(f"Measured latency reduction (%): {latency_impr_pct:.3f}\n")
+    f.write(f"Measured energy reduction (%): {energy_impr_pct:.3f}\n")
+    f.write(f"Measured task success gain (percentage points): {success_gain_pp:.3f}\n")
+    f.write(f"Measured task success gain (relative %): {success_gain_rel_pct:.3f}\n\n")
+    f.write(f"Target latency reduction (%): {target_latency:.3f}\n")
+    f.write(f"Target energy reduction (%): {target_energy:.3f}\n")
+    f.write(f"Target task success gain (percentage points): {target_success:.3f}\n")
+
+print(f"[OK] TensorBoard improvement summary written to: {tb_out_dir}")
+print(f"[OK] Text summary written to: {summary_txt}")
+PY
+    then
+        _ok "  TensorBoard improvement summary generated"
+        _ok "  Text summary saved: results/${RUN_LABEL}/$(basename "${summary_txt}")"
+    else
+        _warn "  Could not generate TensorBoard improvement summary"
+    fi
+}
+
+# ─── write_completion_summary ───────────────────────────────────────────────
+# Compute the same completion metrics used by run_ddqn_healthcheck_7200.sh
+# from a simulator log and save them into a per-run summary file.
+#   $1 = simulation log path
+#   $2 = summary output path
+#   $3 = run label text (e.g., ddqn:Heuristic)
+write_completion_summary() {
+        local sim_log="$1"
+        local summary_file="$2"
+        local run_name="$3"
+
+        if [ ! -f "${sim_log}" ]; then
+                _warn "  Simulator log not found, skipping completion summary: ${sim_log}"
+                return 0
+        fi
+
+        _info "Computing completion summary for ${run_name}"
+        awk -v run_name="${run_name}" -v source_log="${sim_log}" '
+                match($0,/LOCAL_RESULT: task=[^ ]+ .* status=([A-Z_]+)/,m) {
+                    local_total++
+                    if (m[1] == "COMPLETED_ON_TIME") local_success++
+                }
+                match($0,/REDIS_UPDATE: Task [^ ]+ status -> ([A-Z_]+) decision_type=([A-Z_]+)/,m) {
+                    off_total++
+                    if (m[1] == "COMPLETED_ON_TIME") off_success++
+                    if (m[2] == "RSU") {
+                        rsu_total++
+                        if (m[1] == "COMPLETED_ON_TIME") rsu_success++
+                    } else if (m[2] == "SERVICE_VEHICLE") {
+                        sv_total++
+                        if (m[1] == "COMPLETED_ON_TIME") sv_success++
+                    }
+                }
+                function pct(success, total) {
+                    return (total > 0) ? (100.0 * success / total) : 0.0
+                }
+                END {
+                    all_total = local_total + off_total
+                    all_success = local_success + off_success
+
+                    printf("Completion Summary\n")
+                    printf("Run: %s\n", run_name)
+                    printf("Source log: %s\n\n", source_log)
+
+                    printf("All tasks completion: %.2f%% (%d/%d)\n", pct(all_success, all_total), all_success, all_total)
+                    printf("Local tasks completion: %.2f%% (%d/%d)\n", pct(local_success, local_total), local_success, local_total)
+                    printf("All offloaded tasks completion: %.2f%% (%d/%d)\n", pct(off_success, off_total), off_success, off_total)
+                    printf("RSU offloaded tasks completion: %.2f%% (%d/%d)\n", pct(rsu_success, rsu_total), rsu_success, rsu_total)
+                    printf("SV offloaded tasks completion: %.2f%% (%d/%d)\n", pct(sv_success, sv_total), sv_success, sv_total)
+                }
+        ' "${sim_log}" | tee "${summary_file}" > /dev/null
+
+        python3 - "${RESULTS_SUBDIR}" "${run_name}" "${summary_file}" <<'PY'
+import glob
+import json
+import math
+import os
+import sys
+
+TASK_TYPES = [
+    "LOCAL_OBJECT_DETECTION",
+    "COOPERATIVE_PERCEPTION",
+    "ROUTE_OPTIMIZATION",
+    "FLEET_TRAFFIC_FORECAST",
+    "VOICE_COMMAND_PROCESSING",
+    "SENSOR_HEALTH_CHECK",
+]
+
+
+def finite_values(values):
+    return [
+        float(v) for v in values
+        if isinstance(v, (int, float)) and math.isfinite(float(v))
+    ]
+
+
+def pct(successes):
+    values = finite_values(successes)
+    return (sum(values) / len(values) * 100.0, len(values)) if values else (None, 0)
+
+
+def mean(values):
+    values = finite_values(values)
+    return (sum(values) / len(values), len(values)) if values else (None, 0)
+
+
+results_dir, run_name, summary_file = sys.argv[1:4]
+agent, sim_cfg = run_name.split(":", 1)
+sim_cfg_norm = sim_cfg.lower()
+
+runs = []
+for path in sorted(glob.glob(os.path.join(results_dir, "*.json"))):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        continue
+
+    if data.get("agent") != agent:
+        continue
+    if str(data.get("offload_mode", "")).lower() != sim_cfg_norm:
+        continue
+    runs.append((path, data))
+
+with open(summary_file, "a", encoding="utf-8") as out:
+    out.write("\nAggregated Metrics Across Redis Instances\n")
+    out.write("Source JSON files: ")
+    if runs:
+        out.write(", ".join(os.path.basename(p) for p, _ in runs) + "\n")
+    else:
+        out.write("none found\n")
+        out.write("Note: weighted metric aggregation requires result JSON files from this run.\n")
+        sys.exit(0)
+
+    all_latencies = []
+    total_tasks_from_json = 0
+    for _, data in runs:
+        metrics = data.get("metrics", {})
+        total_tasks_from_json += int(metrics.get("total_tasks", 0) or 0)
+        for values in metrics.get("latencies", {}).values():
+            all_latencies.extend(values if isinstance(values, list) else [])
+
+    overall_latency, overall_latency_count = mean(all_latencies)
+    if overall_latency is None:
+        out.write("Overall average latency: N/A\n")
+    else:
+        out.write(
+            f"Overall average latency: {overall_latency:.6f}s "
+            f"({overall_latency_count} tasks, weighted across instances)\n"
+        )
+    out.write(f"Total tasks in JSON metrics: {total_tasks_from_json}\n")
+
+    out.write("\nAverage energy by task type:\n")
+    for task_type in TASK_TYPES:
+        values = []
+        for _, data in runs:
+            task_values = data.get("metrics", {}).get("energies", {}).get(task_type, [])
+            values.extend(task_values if isinstance(task_values, list) else [])
+        avg_energy, count = mean(values)
+        if avg_energy is None:
+            out.write(f"{task_type}: N/A (0 tasks)\n")
+        else:
+            total_energy = sum(finite_values(values))
+            out.write(
+                f"{task_type}: avg={avg_energy:.6f}J total={total_energy:.6f}J "
+                f"({count} tasks)\n"
+            )
+
+    out.write("\nSuccess rate by task type:\n")
+    has_success_metric = any(
+        "task_type_successes" in data.get("metrics", {}) for _, data in runs
+    )
+    if not has_success_metric:
+        out.write("N/A: rerun with updated main.py to generate task_type_successes in result JSON files.\n")
+    else:
+        for task_type in TASK_TYPES:
+            values = []
+            for _, data in runs:
+                task_values = data.get("metrics", {}).get("task_type_successes", {}).get(task_type, [])
+                values.extend(task_values if isinstance(task_values, list) else [])
+            rate, count = pct(values)
+            if rate is None:
+                out.write(f"{task_type}: N/A (0 tasks)\n")
+            else:
+                successes = int(sum(finite_values(values)))
+                out.write(f"{task_type}: {rate:.2f}% ({successes}/{count})\n")
+PY
+
+        _ok "  Completion summary saved: results/${RUN_LABEL}/$(basename "${summary_file}")"
+}
+
 # ─── run_one ─────────────────────────────────────────────────────────────────
 # Execute a single agent + simulation pair.
 #   $1 = agent name  (e.g. "ddqn")
@@ -222,6 +599,7 @@ run_one() {
     # ── Log paths for this run ──────────────────────────────────────────────
     local sim_log="${SIM_LOG_DIR}/sim_output_single_agent_${sim_cfg}_${agent}.log"
     local drl_log="${DRL_LOG_DIR}/drl_output_single_agent_${sim_cfg}_${agent}.log"
+    local completion_summary_file="${RESULTS_SUBDIR}/completion_summary_${sim_cfg}_${agent}.txt"
 
     # ── Flush Redis ─────────────────────────────────────────────────────────
     flush_redis
@@ -261,9 +639,15 @@ run_one() {
     # ── Start DRL agent ─────────────────────────────────────────────────────
     _info "Starting DRL agent  [agent=${agent}]"
     _info "  DRL log: ${drl_log}"
+    local drl_extra_args=()
+    if [ "${agent}" = "ddqn" ] || [ "${agent}" = "vanilla_dqn" ]; then
+        drl_extra_args+=(--resume_training)
+        _info "  Continuous training enabled: existing ${agent} model checkpoints will be reused if found"
+    fi
+
     (
         cd "${DRL_DIR}" || exit 1
-        exec python3 -u main.py --env redis --agent "${agent}" \
+        exec python3 -u main.py --env redis --agent "${agent}" "${drl_extra_args[@]}" \
             > "${drl_log}" 2>&1
     ) &
     _DRL_PID=$!
@@ -294,6 +678,9 @@ run_one() {
     move_new_results "${ref_file}"
     rm -f "${ref_file}"
 
+    # ── Completion summary (same metrics as healthcheck script) ────────────
+    write_completion_summary "${sim_log}" "${completion_summary_file}" "${agent}:${sim_cfg}"
+
     if [ "${sim_exit_code}" -ne 0 ] && [ "${sim_dur}" -lt "${SIM_MIN_RUNTIME}" ]; then
         _warn "Run ${agent}/${sim_cfg} likely failed due to sim crash — results may be empty."
         return 1
@@ -306,9 +693,17 @@ run_one() {
 # MAIN
 # =============================================================================
 
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+    exit 0
+fi
+
+build_selected_runs || exit 1
+
 _section "run_all_agents.sh — RUN_LABEL=${RUN_LABEL}"
 update_redis_log_dir
-echo "  Runs planned : ${#RUNS[@]}"
+echo "  Runs planned : ${#FILTERED_RUNS[@]}"
+echo "  Agents       : ${SELECTED_AGENTS[*]:-all}"
 echo "  Sim time     : ${SIM_TIME}"
 echo "  DRL log dir  : ${DRL_LOG_DIR}"
 echo "  Sim log dir  : ${SIM_LOG_DIR}"
@@ -327,7 +722,7 @@ FAILED_RUNS=()
 COMPLETED_RUNS=()
 
 # ── Execute each run ──────────────────────────────────────────────────────────
-for entry in "${RUNS[@]}"; do
+for entry in "${FILTERED_RUNS[@]}"; do
     agent="${entry%%:*}"
     sim_cfg="${entry##*:}"
 
@@ -390,3 +785,6 @@ if [ $? -eq 0 ]; then
 else
     _error "compare.py failed — check logs above"
 fi
+
+# ── Emit TensorBoard summary for DDQN vs baselines ─────────────────────────
+emit_tensorboard_improvement_summary "${ALL_INST0[@]}"

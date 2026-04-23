@@ -9,7 +9,7 @@ REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 RUN_LABEL="ddqn_7200_healthcheck_$(date +%Y%m%d_%H%M%S)"
 SIM_TIME="7200s"
 DRL_START_DELAY=2
-REDIS_DBS=(0 1 2)
+REDIS_DBS=(4 5 6)
 DRL_SHUTDOWN_TIMEOUT=30
 
 DRL_LOG_DIR="${DRL_DIR}/logs/${RUN_LABEL}"
@@ -116,6 +116,48 @@ while IFS= read -r -d '' f; do
   echo "[OK] Moved result -> ${RESULTS_SUBDIR}/$(basename "$f")"
 done < <(find "${DRL_DIR}/results" -maxdepth 1 -name "ddqn_*.json" -newer "${REF_FILE}" -print0)
 rm -f "${REF_FILE}"
+
+SUMMARY_FILE="${RESULTS_SUBDIR}/completion_summary.txt"
+if [[ -f "${SIM_LOG}" ]]; then
+  echo "[INFO] Computing completion summary from simulator log..."
+  awk -v run_label="${RUN_LABEL}" -v source_log="${SIM_LOG}" '
+    match($0,/LOCAL_RESULT: task=[^ ]+ .* status=([A-Z_]+)/,m) {
+      local_total++
+      if (m[1] == "COMPLETED_ON_TIME") local_success++
+    }
+    match($0,/REDIS_UPDATE: Task [^ ]+ status -> ([A-Z_]+) decision_type=([A-Z_]+)/,m) {
+      off_total++
+      if (m[1] == "COMPLETED_ON_TIME") off_success++
+      if (m[2] == "RSU") {
+        rsu_total++
+        if (m[1] == "COMPLETED_ON_TIME") rsu_success++
+      } else if (m[2] == "SERVICE_VEHICLE") {
+        sv_total++
+        if (m[1] == "COMPLETED_ON_TIME") sv_success++
+      }
+    }
+    function pct(success, total) {
+      return (total > 0) ? (100.0 * success / total) : 0.0
+    }
+    END {
+      all_total = local_total + off_total
+      all_success = local_success + off_success
+
+      printf("Completion Summary\n")
+      printf("Run label: %s\n", run_label)
+      printf("Source log: %s\n\n", source_log)
+
+      printf("All tasks completion: %.2f%% (%d/%d)\n", pct(all_success, all_total), all_success, all_total)
+      printf("Local tasks completion: %.2f%% (%d/%d)\n", pct(local_success, local_total), local_success, local_total)
+      printf("All offloaded tasks completion: %.2f%% (%d/%d)\n", pct(off_success, off_total), off_success, off_total)
+      printf("RSU offloaded tasks completion: %.2f%% (%d/%d)\n", pct(rsu_success, rsu_total), rsu_success, rsu_total)
+      printf("SV offloaded tasks completion: %.2f%% (%d/%d)\n", pct(sv_success, sv_total), sv_success, sv_total)
+    }
+  ' "${SIM_LOG}" | tee "${SUMMARY_FILE}"
+  echo "[OK] Saved completion summary -> ${SUMMARY_FILE}"
+else
+  echo "[WARN] Simulator log not found, skipping completion summary"
+fi
 
 echo "[DONE] DDQN healthcheck run complete"
 echo "[INFO] TensorBoard folder: ${DRL_DIR}/${TB_LOG_DIR}"

@@ -97,7 +97,12 @@ def _create_agent(agent_name, load_path=None):
         agent.global_step = initial_ep
         return agent
     elif agent_name == 'vanilla_dqn':
-        return VanillaDQNAgent()
+        agent = VanillaDQNAgent()
+        initial_ep = 0
+        if load_path:
+            initial_ep = agent.load_model(load_path) or 0
+        agent.global_step = initial_ep
+        return agent
     elif agent_name == 'random':
         return RandomAgent()
     elif agent_name == 'greedy_compute':
@@ -152,7 +157,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     rsu_id   = instance_cfg['rsu_id']
 
     log_dir    = os.path.join(Config.LOG_DIR, f"{agent_name}_{offload_mode}", f"instance_{iid}")
-    model_path = os.path.join(Config.BASE_DIR, "models", f"ddqn_rsu{iid}.pth")
+    model_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     os.makedirs(os.path.join(Config.BASE_DIR, "results"), exist_ok=True)
@@ -180,6 +185,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     # Per-task-type rolling data (all tasks combined)
     lat_by_type  = defaultdict(list)   # task_type → [latency, ...]
     ene_by_type  = defaultdict(list)   # task_type → [energy, ...]
+    succ_by_type = defaultdict(list)   # task_type → [0/1 success, ...]
 
     offload_rewards   = []   # only for ddqn
     offload_successes = []
@@ -282,6 +288,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
                 lat_by_type[ttype].append(latency)
                 ene_by_type[ttype].append(energy)
+                succ_by_type[ttype].append(1 if success else 0)
                 offload_successes.append(1 if success else 0)
                 all_successes.append(1 if success else 0)
                 decision_types.append(entry['decision_type'])
@@ -331,6 +338,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
                 lat_by_type[ttype].append(latency)
                 ene_by_type[ttype].append(energy)
+                succ_by_type[ttype].append(1 if success else 0)
                 local_successes.append(1 if success else 0)
                 all_successes.append(1 if success else 0)
                 all_fail_reasons.append(reason)
@@ -412,6 +420,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                                                         transform=lambda w: sum(w)/len(w)*100),
             "latencies":          {t: lat_by_type[t] for t in TASK_TYPES},
             "energies":           {t: ene_by_type[t] for t in TASK_TYPES},
+            "task_type_successes": {t: succ_by_type[t] for t in TASK_TYPES},
             "failure_reasons":    dict(fail_counts),
             "qos_success_rates": {
                 f"qos{q}": _build_rolling_series(

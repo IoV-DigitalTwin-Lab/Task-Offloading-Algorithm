@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/ddqn_7200_healthcheck_20260420_062754"
+        "log_dir": "output/new_all_heuristic"
     },
     "rewards": {
         "reward_success": 15,
@@ -19,10 +19,10 @@
         "lr": 0.0001,
         "gamma": 0.99,
         "tau": 0.005,
-        "epsilon_start": 1.0,
+        "epsilon_start": 0.4,
         "epsilon_end": 0.02,
-        "epsilon_decay": 0.9997,
-        "batch_size": 256,
+        "epsilon_decay": 0.995,
+        "batch_size": 128,
         "memory_size": 100000,
         "per_alpha": 0.6,
         "per_beta": 0.4
@@ -43,19 +43,19 @@
             {
                 "instance_id": 0,
                 "rsu_id": "RSU_0",
-                "redis_db": 0,
+                "redis_db": 4,
                 "active": true
             },
             {
                 "instance_id": 1,
                 "rsu_id": "RSU_1",
-                "redis_db": 1,
+                "redis_db": 5,
                 "active": true
             },
             {
                 "instance_id": 2,
                 "rsu_id": "RSU_2",
-                "redis_db": 2,
+                "redis_db": 6,
                 "active": true
             }
         ],
