@@ -22,7 +22,7 @@
 #   • Results subdirectory:  results/<RUN_LABEL>/
 #   • TensorBoard subdirectory in configs/redis_config.json:
 #       system.log_dir = output/<RUN_LABEL>
-RUN_LABEL="${RUN_LABEL:-new_all_heuristic}"
+RUN_LABEL="test1_all_heuristic"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
 SIM_TIME="7200s"
@@ -31,18 +31,27 @@ SIM_TIME="7200s"
 # (gives the simulator time to connect to Redis and write initial state)
 DRL_START_DELAY=4
 
+# Capture simulator stdout/stderr into per-run log files only when explicitly
+# enabled. The heuristic DDQN simulation is very chatty and can otherwise
+# generate multi-giabyte logs.
+CAPTURE_SIM_LOG=${CAPTURE_SIM_LOG:-0}
+
+# Capture secondary DT stdout/stderr only when explicitly enabled.
+CAPTURE_SECONDARY_DT_LOG=${CAPTURE_SECONDARY_DT_LOG:-0}
+
 # ── Agents to run ────────────────────────────────────────────────────────────
 # Format: "agent_name:SimulationConfig"
 # Comment out any line to skip that run.
 #
 # agent_name must be one of:
-#   ddqn | vanilla_dqn | random | greedy_compute |
+#   ddqn | ddqn_no_tau | vanilla_dqn | random | greedy_compute |
 #   min_latency | least_queue | greedy_distance | local
 #
 # SimulationConfig must match a [Config ...] section in omnetpp.ini:
 #   Heuristic | AllOffload | AllLocal
 RUNS=(
     "ddqn:Heuristic"
+    "ddqn_no_tau:Heuristic"
     "vanilla_dqn:Heuristic"
     "random:Heuristic"
     "greedy_compute:Heuristic"
@@ -80,7 +89,8 @@ TARGET_SUCCESS_GAIN_PCT=7.0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRL_DIR="${SCRIPT_DIR}"
-SIM_DIR="/opt/omnet/omnetpp-6.1/workspace2/IoV-Digital-Twin-TaskOffloading"
+SIM_DIR="/opt/omnet/omnetpp-6.1/workspace/IoV-Digital-Twin-TaskOffloading"
+SECONDARY_DT_SCRIPT="${SIM_DIR}/run_secondary_dt.sh"
 REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 
 DRL_LOG_DIR="${DRL_DIR}/logs/${RUN_LABEL}"
@@ -95,6 +105,10 @@ SIM_MIN_RUNTIME=30
 # Seconds to wait for the DRL agent to finish saving results after SIGINT.
 # If it does not exit within this window it is force-killed.
 DRL_SHUTDOWN_TIMEOUT=30
+
+# Seconds to wait for the secondary DT wrapper to stop after SIGINT before
+# escalating to SIGTERM and, if required, SIGKILL.
+SECONDARY_SHUTDOWN_TIMEOUT=20
 
 # =============================================================================
 # IMPLEMENTATION
@@ -177,11 +191,13 @@ build_selected_runs() {
 # Active PIDs — used by the SIGINT trap for cleanup
 _SIM_PID=""
 _DRL_PID=""
+_SECONDARY_PID=""
 
 _cleanup() {
     echo ""
     _warn "Interrupted — cleaning up active processes..."
     [ -n "${_SIM_PID}" ] && kill "${_SIM_PID}" 2>/dev/null && _info "Killed sim PID ${_SIM_PID}"
+    [ -n "${_SECONDARY_PID}" ] && kill "${_SECONDARY_PID}" 2>/dev/null && _info "Killed secondary DT PID ${_SECONDARY_PID}"
     [ -n "${_DRL_PID}" ] && kill -SIGINT "${_DRL_PID}" 2>/dev/null && wait "${_DRL_PID}" 2>/dev/null \
         && _info "DRL PID ${_DRL_PID} stopped"
     exit 1
@@ -256,6 +272,77 @@ _stop_drl_gracefully() {
     else
         _ok "DRL agent stopped cleanly after ${elapsed}s"
     fi
+}
+
+_agent_uses_tau() {
+    local agent="$1"
+    [[ "$agent" != "ddqn_no_tau" ]]
+}
+
+_start_secondary_dt() {
+    local agent="$1"
+    local sim_cfg="$2"
+
+    if ! _agent_uses_tau "$agent"; then
+        return 0
+    fi
+
+    if [ ! -x "${SECONDARY_DT_SCRIPT}" ]; then
+        _warn "Secondary DT script not executable: ${SECONDARY_DT_SCRIPT}"
+        return 0
+    fi
+
+    local secondary_log="${SIM_LOG_DIR}/secondary_dt_${sim_cfg}_${agent}.log"
+    local secondary_output_target="/dev/null"
+
+    if [ "${CAPTURE_SECONDARY_DT_LOG}" -eq 1 ]; then
+        secondary_output_target="${secondary_log}"
+    fi
+
+    _info "Starting secondary DT for tau-enabled run"
+    if [ "${CAPTURE_SECONDARY_DT_LOG}" -eq 1 ]; then
+        _info "  Secondary DT log: ${secondary_log}"
+    else
+        _info "  Secondary DT log: disabled (set CAPTURE_SECONDARY_DT_LOG=1 to capture)"
+    fi
+    (
+        cd "${SIM_DIR}" || exit 1
+        exec "${SECONDARY_DT_SCRIPT}" > "${secondary_output_target}" 2>&1
+    ) &
+    _SECONDARY_PID=$!
+    _ok "Secondary DT started (PID: ${_SECONDARY_PID})"
+}
+
+_stop_secondary_dt() {
+    if [ -z "${_SECONDARY_PID}" ]; then
+        return 0
+    fi
+
+    if kill -0 "${_SECONDARY_PID}" 2>/dev/null; then
+        _info "Stopping secondary DT (PID: ${_SECONDARY_PID}) with up to ${SECONDARY_SHUTDOWN_TIMEOUT}s for clean shutdown..."
+        kill -SIGINT "${_SECONDARY_PID}" 2>/dev/null || true
+
+        local elapsed=0
+        while kill -0 "${_SECONDARY_PID}" 2>/dev/null && [ "${elapsed}" -lt "${SECONDARY_SHUTDOWN_TIMEOUT}" ]; do
+            sleep 1
+            (( elapsed++ )) || true
+        done
+
+        if kill -0 "${_SECONDARY_PID}" 2>/dev/null; then
+            _warn "Secondary DT did not stop within ${SECONDARY_SHUTDOWN_TIMEOUT}s — sending SIGTERM"
+            kill -SIGTERM "${_SECONDARY_PID}" 2>/dev/null || true
+            sleep 2
+        fi
+
+        if kill -0 "${_SECONDARY_PID}" 2>/dev/null; then
+            _warn "Secondary DT still running — force killing (SIGKILL)"
+            kill -9 "${_SECONDARY_PID}" 2>/dev/null || true
+            sleep 1
+        fi
+
+        wait "${_SECONDARY_PID}" 2>/dev/null || true
+    fi
+    _SECONDARY_PID=""
 }
 
 # ─── move_new_results ─────────────────────────────────────────────────────────
@@ -600,6 +687,11 @@ run_one() {
     local sim_log="${SIM_LOG_DIR}/sim_output_single_agent_${sim_cfg}_${agent}.log"
     local drl_log="${DRL_LOG_DIR}/drl_output_single_agent_${sim_cfg}_${agent}.log"
     local completion_summary_file="${RESULTS_SUBDIR}/completion_summary_${sim_cfg}_${agent}.txt"
+    local sim_output_target="/dev/null"
+
+    if [ "${CAPTURE_SIM_LOG}" -eq 1 ]; then
+        sim_output_target="${sim_log}"
+    fi
 
     # ── Flush Redis ─────────────────────────────────────────────────────────
     flush_redis
@@ -610,16 +702,23 @@ run_one() {
 
     # ── Start simulation ────────────────────────────────────────────────────
     _info "Starting simulation  [config=${sim_cfg}, time=${SIM_TIME}]"
-    _info "  Sim log: ${sim_log}"
+    if [ "${CAPTURE_SIM_LOG}" -eq 1 ]; then
+        _info "  Sim log: ${sim_log}"
+    else
+        _info "  Sim log: disabled (set CAPTURE_SIM_LOG=1 to capture)"
+    fi
     local sim_start_epoch
     sim_start_epoch=$(date +%s)
     (
         cd "${SIM_DIR}" || exit 1
         exec ./run_simulation.sh -u Cmdenv -c "${sim_cfg}" --sim-time-limit="${SIM_TIME}" \
-            > "${sim_log}" 2>&1
+            > "${sim_output_target}" 2>&1
     ) &
     _SIM_PID=$!
     _ok "Simulation started (PID: ${_SIM_PID})"
+
+    # ── Start secondary DT (tau-enabled agents only) ──────────────────────
+    _start_secondary_dt "${agent}" "${sim_cfg}"
 
     # ── Wait before launching DRL ───────────────────────────────────────────
     _info "Waiting ${DRL_START_DELAY}s for simulator to initialise Redis..."
@@ -629,8 +728,13 @@ run_one() {
     if ! kill -0 "${_SIM_PID}" 2>/dev/null; then
         local sim_dur=$(( $(date +%s) - sim_start_epoch ))
         _error "Simulation exited after ${sim_dur}s (before DRL was started) — likely a crash."
-        _error "Check sim log for errors: ${sim_log}"
+        if [ "${CAPTURE_SIM_LOG}" -eq 1 ]; then
+            _error "Check sim log for errors: ${sim_log}"
+        else
+            _error "Re-run with CAPTURE_SIM_LOG=1 to capture simulator output for debugging."
+        fi
         _warn "Skipping DRL launch for this run."
+        _stop_secondary_dt
         _SIM_PID=""
         rm -f "${ref_file}"
         return 1
@@ -669,6 +773,8 @@ run_one() {
     else
         _ok "Simulation finished normally after ${sim_dur}s"
     fi
+
+    _stop_secondary_dt
 
     # Stop DRL whether sim succeeded or crashed (results may still be partial)
     _stop_drl_gracefully "${_DRL_PID}"
@@ -733,6 +839,7 @@ for entry in "${FILTERED_RUNS[@]}"; do
         FAILED_RUNS+=("${agent}:${sim_cfg}")
         # Ensure processes are dead before next run
         [ -n "${_SIM_PID}" ] && kill "${_SIM_PID}" 2>/dev/null; _SIM_PID=""
+        [ -n "${_SECONDARY_PID}" ] && kill "${_SECONDARY_PID}" 2>/dev/null; _SECONDARY_PID=""
         [ -n "${_DRL_PID}" ] && kill "${_DRL_PID}" 2>/dev/null; _DRL_PID=""
     fi
 

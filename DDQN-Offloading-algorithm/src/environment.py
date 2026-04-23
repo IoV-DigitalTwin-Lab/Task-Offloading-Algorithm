@@ -308,7 +308,7 @@ class IoVRedisEnv:
         WRITES: Redis  — offloading decision for the simulator to pick up
     """
 
-    def __init__(self, redis_db: int = 0, instance_id: int = 0):
+    def __init__(self, redis_db: int = 0, instance_id: int = 0, tau_enabled: bool = True):
         self.instance_id = instance_id
         self.r = redis.Redis(
             host=Config.REDIS_HOST,
@@ -325,6 +325,16 @@ class IoVRedisEnv:
         self.norm           = Config.REDIS_NORMALIZATION
         self.rsu_ids        = Config.RSU_IDS
         self.num_rsus       = Config.NUM_RSUS
+
+        # Phase 2: SINR -> tau parameters (aligned with secondary DT defaults)
+        self.dt2_run_id = Config.DT2_RUN_ID
+        self.q_cycle_scan_limit = Config.DT2_Q_SCAN_LIMIT
+        self.prediction_step_s = Config.DT2_PRED_STEP_S
+        self.bandwidth_hz = Config.LINK_BANDWIDTH_HZ
+        self.rate_efficiency = Config.LINK_RATE_EFFICIENCY
+        self.default_output_ratio = Config.TASK_OUTPUT_RATIO
+        self.default_tau_penalty_s = Config.TAU_MISSING_PENALTY_S
+        self.tau_enabled = bool(tau_enabled)
 
         # Episode state
         self.task_request     = {}   # raw dict from Redis request hash
@@ -347,15 +357,23 @@ class IoVRedisEnv:
                 _, task_id = result
                 data = self.r.hgetall(f"task:{task_id}:request")
                 if data:
+                    mem_footprint_bytes = float(data.get('mem_footprint_bytes', 0))
+                    input_size_bytes = float(data.get('input_size_bytes', mem_footprint_bytes))
+                    output_size_bytes = float(data.get('output_size_bytes', input_size_bytes * self.default_output_ratio))
+                    cpu_cycles = float(data.get('cpu_cycles', 0))
                     return {
                         'task_id':         task_id,
                         'vehicle_id':      data.get('vehicle_id', ''),
                         'rsu_id':          data.get('rsu_id', self.rsu_ids[0]),
                         # Convert raw bytes → normalized units used in state vector
-                        'mem_footprint_mb':  float(data.get('mem_footprint_bytes', 0)) / (1024 * 1024),
-                        'cpu_req_mcycles':   float(data.get('cpu_cycles', 0)) / 1e6,
+                        'mem_footprint_mb':  mem_footprint_bytes / (1024 * 1024),
+                        'cpu_req_mcycles':   cpu_cycles / 1e6,
                         'deadline_s':        float(data.get('deadline_seconds', 1.0)),
                         'qos':               float(data.get('qos_value', 1.0)),
+                        # Raw task metadata used for tau computation
+                        'input_size_bytes':  input_size_bytes,
+                        'output_size_bytes': output_size_bytes,
+                        'cpu_cycles':        cpu_cycles,
                     }
 
     def _fetch_rsu_state(self, rsu_id):
@@ -396,7 +414,240 @@ class IoVRedisEnv:
             'pos_y':            float(data.get('pos_y', 0)),
             'sinr':             float(data.get('sinr', 0)),  # populated by simulator in future
             'distance_to_origin': 0.0,  # computed after origin is known
+            # Phase 2 tau features (filled later for selected top-K candidates)
+            'tau_up': 0.0,
+            'tau_comp': 0.0,
+            'tau_down': 0.0,
+            'tau_total': 0.0,
         }
+
+    def _get_latest_q_cycle(self):
+        """Read latest secondary Q cycle index from Redis."""
+        latest_key = f"dt2:q:{self.dt2_run_id}:latest"
+        raw = self.r.hget(latest_key, "cycle_index")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                pass
+
+        stream_key = f"dt2:q:{self.dt2_run_id}:entries"
+        tail = self.r.xrevrange(stream_key, count=1)
+        if not tail:
+            return None
+        _, fields = tail[0]
+        try:
+            return int(fields.get('cycle_index', 0))
+        except (TypeError, ValueError):
+            return None
+
+    def _process_q_entries(self, cycle_id):
+        """Build per-link SINR sequences for one Q cycle."""
+        stream_key = f"dt2:q:{self.dt2_run_id}:entries"
+        entries = self.r.xrevrange(stream_key, count=self.q_cycle_scan_limit)
+        links = {}
+        seen_target_cycle = False
+
+        for _entry_id, fields in entries:
+            try:
+                entry_cycle = int(fields.get('cycle_index', 0))
+            except (TypeError, ValueError):
+                continue
+
+            if entry_cycle > cycle_id:
+                continue
+            if entry_cycle < cycle_id:
+                if seen_target_cycle:
+                    break
+                continue
+            seen_target_cycle = True
+
+            link_type = fields.get('link_type', '')
+            tx_id = fields.get('tx_id', '')
+            rx_id = fields.get('rx_id', '')
+
+            try:
+                sinr_db = float(fields.get('sinr_db', -100.0))
+            except (TypeError, ValueError):
+                sinr_db = -100.0
+
+            try:
+                predicted_time = float(fields.get('predicted_time', 0.0))
+            except (TypeError, ValueError):
+                predicted_time = 0.0
+
+            link_key = f"{link_type}:{tx_id}:{rx_id}"
+            if link_key not in links:
+                links[link_key] = {
+                    'link_type': link_type,
+                    'tx_id': tx_id,
+                    'rx_id': rx_id,
+                    'sinr_sequence': [],
+                    'predicted_times': [],
+                }
+
+            links[link_key]['sinr_sequence'].append(sinr_db)
+            links[link_key]['predicted_times'].append(predicted_time)
+
+        # Stream is newest-first; restore temporal order per link.
+        for link in links.values():
+            combined = sorted(zip(link['predicted_times'], link['sinr_sequence']))
+            link['predicted_times'] = [ts for ts, _ in combined]
+            link['sinr_sequence'] = [sinr for _, sinr in combined]
+
+        return links
+
+    def _sinr_db_to_rate_bps(self, sinr_db):
+        """Shannon-like link-rate model aligned with external controller."""
+        sinr_linear = 10.0 ** (sinr_db / 10.0)
+        sinr_linear = max(sinr_linear, 1e-9)
+        return self.bandwidth_hz * math.log2(1.0 + sinr_linear) * self.rate_efficiency
+
+    def _accumulate_transmission_time(self, sinr_sequence, data_bits):
+        """Accumulate slot capacity until data_bits are transmitted."""
+        if data_bits <= 0:
+            return 0.0
+        if not sinr_sequence:
+            return self.default_tau_penalty_s
+
+        remaining = data_bits
+        elapsed_s = 0.0
+
+        for sinr_db in sinr_sequence:
+            rate_bps = max(self._sinr_db_to_rate_bps(sinr_db), 1.0)
+            bits_this_slot = rate_bps * self.prediction_step_s
+
+            if remaining <= bits_this_slot:
+                elapsed_s += remaining / rate_bps
+                return elapsed_s
+
+            remaining -= bits_this_slot
+            elapsed_s += self.prediction_step_s
+
+        # If the window is too short, continue with the last observed rate.
+        tail_rate_bps = max(self._sinr_db_to_rate_bps(sinr_sequence[-1]), 1.0)
+        elapsed_s += remaining / tail_rate_bps
+        return elapsed_s
+
+    def _slice_from_offset(self, sinr_sequence, predicted_times, t_start):
+        """Slice DL SINR from t0 + t_start to model tau_up + tau_comp delay."""
+        if not predicted_times:
+            return sinr_sequence
+
+        t0 = predicted_times[0]
+        sliced = [
+            sinr
+            for predicted_time, sinr in zip(predicted_times, sinr_sequence)
+            if predicted_time >= t0 + t_start
+        ]
+        return sliced if sliced else sinr_sequence[-1:]
+
+    def _get_compute_capacity_hz(self, target_id):
+        """Read target compute capacity in Hz from RSU/vehicle resource keys."""
+        rsu = self.rsu_states.get(target_id)
+        if rsu:
+            cap = float(rsu.get('cpu_available', 0.0))
+            if cap > 0:
+                return cap
+
+        vehicle_state = self._fetch_vehicle_state(target_id)
+        if vehicle_state:
+            cap = float(vehicle_state.get('cpu_available', 0.0))
+            if cap > 0:
+                return cap
+
+        # Safe fallback to avoid divide-by-zero.
+        return 1e9
+
+    def _compute_v2v_tau(self, source_vehicle, service_vehicle, links, d_in_bits, d_out_bits, c_cycles):
+        """Compute tau tuple for one selected service vehicle candidate."""
+        ul_key = f"V2V:{source_vehicle}:{service_vehicle}"
+        dl_key = f"V2V:{service_vehicle}:{source_vehicle}"
+        ul_data = links.get(ul_key)
+        dl_data = links.get(dl_key)
+
+        if not ul_data or not dl_data:
+            return {
+                'tau_up': self.default_tau_penalty_s,
+                'tau_comp': self.default_tau_penalty_s,
+                'tau_down': self.default_tau_penalty_s,
+                'tau_total': self.default_tau_penalty_s * 3.0,
+            }
+
+        tau_up = self._accumulate_transmission_time(ul_data['sinr_sequence'], d_in_bits)
+        f_avail_hz = self._get_compute_capacity_hz(service_vehicle)
+        tau_comp = c_cycles / max(f_avail_hz, 1.0)
+        dl_sinr_seq = self._slice_from_offset(
+            dl_data['sinr_sequence'],
+            dl_data['predicted_times'],
+            tau_up + tau_comp,
+        )
+        tau_down = self._accumulate_transmission_time(dl_sinr_seq, d_out_bits)
+        tau_total = tau_up + tau_comp + tau_down
+
+        return {
+            'tau_up': tau_up,
+            'tau_comp': tau_comp,
+            'tau_down': tau_down,
+            'tau_total': tau_total,
+        }
+
+    def _attach_tau_to_candidates(self, source_vehicle, states):
+        """Phase 2 core: compute tau for already-selected top-K closest candidates."""
+        if not states:
+            return states
+
+        if not self.tau_enabled:
+            for state in states:
+                state['tau_up'] = 0.0
+                state['tau_comp'] = 0.0
+                state['tau_down'] = 0.0
+                state['tau_total'] = 0.0
+            return states
+
+        cycle_id = self._get_latest_q_cycle()
+        if cycle_id is None:
+            for state in states:
+                state['tau_up'] = self.default_tau_penalty_s
+                state['tau_comp'] = self.default_tau_penalty_s
+                state['tau_down'] = self.default_tau_penalty_s
+                state['tau_total'] = self.default_tau_penalty_s * 3.0
+            return states
+
+        links = self._process_q_entries(cycle_id)
+        if not links:
+            for state in states:
+                state['tau_up'] = self.default_tau_penalty_s
+                state['tau_comp'] = self.default_tau_penalty_s
+                state['tau_down'] = self.default_tau_penalty_s
+                state['tau_total'] = self.default_tau_penalty_s * 3.0
+            return states
+
+        d_in_bits = max(0.0, float(self.task_request.get('input_size_bytes', 0.0)) * 8.0)
+        d_out_bits = max(0.0, float(self.task_request.get('output_size_bytes', 0.0)) * 8.0)
+        c_cycles = max(0.0, float(self.task_request.get('cpu_cycles', 0.0)))
+
+        # Fallback for tasks where fields may not yet be populated.
+        if d_in_bits <= 0.0:
+            d_in_bits = max(0.0, float(self.task_request.get('mem_footprint_mb', 0.0)) * 1024.0 * 1024.0 * 8.0)
+        if d_out_bits <= 0.0:
+            d_out_bits = d_in_bits * self.default_output_ratio
+        if c_cycles <= 0.0:
+            c_cycles = max(0.0, float(self.task_request.get('cpu_req_mcycles', 0.0)) * 1e6)
+
+        for state in states:
+            target_id = state['vehicle_id']
+            tau = self._compute_v2v_tau(source_vehicle, target_id, links, d_in_bits, d_out_bits, c_cycles)
+            state.update(tau)
+
+        return states
+
+    # Maximum V2V communication range in metres.
+    # Matches the ~178 m free-space threshold derived from PayloadVehicleApp's
+    # estimateV2vRssiDbm() at the -85 dBm sensitivity limit.  We use a slightly
+    # larger value (250 m) to give the agent a small safety margin for vehicles
+    # that are momentarily near the boundary.
+    MAX_SV_DISTANCE_M = 250.0
 
     # Maximum V2V communication range in metres.
     # Matches the ~178 m free-space threshold derived from PayloadVehicleApp's
@@ -416,10 +667,7 @@ class IoVRedisEnv:
         3. Filter to only SVs within MAX_SV_DISTANCE_M of the origin vehicle.
         4. Re-sort the survivors by distance and keep the MAX_NEIGHBORS closest.
         """
-        # Fetch up to 50 entries from the sorted set (avoids missing nearby SVs)
-        top = self.r.zrevrange(
-            'service_vehicles:available', 0, 49, withscores=True
-        )
+        top = self.r.zrevrange('service_vehicles:available', 0, -1, withscores=True)
         candidates, states = [], []
         stale_ids = []
         for vehicle_id, _ in top:
@@ -450,7 +698,9 @@ class IoVRedisEnv:
         paired = sorted(zip(candidates, states), key=lambda x: x[1]['distance_to_origin'])
         paired = paired[:Config.MAX_NEIGHBORS]
         if paired:
+            paired = paired[:Config.MAX_NEIGHBORS]
             candidates, states = zip(*paired)
+            states = self._attach_tau_to_candidates(origin_id, list(states))
             return list(candidates), list(states)
         return [], []
 
@@ -542,6 +792,10 @@ class IoVRedisEnv:
                 speed             = s.get('speed', 0.0),
                 heading           = s.get('heading', 0.0),
                 distance_to_origin= s.get('distance_to_origin', 9999.0),
+                tau_up       = s.get('tau_up', 0.0),
+                tau_comp     = s.get('tau_comp', 0.0),
+                tau_down     = s.get('tau_down', 0.0),
+                tau_total    = s.get('tau_total', 0.0),
             )
             for s in self.candidate_states
         ]
@@ -586,22 +840,9 @@ class IoVRedisEnv:
         Returns: (next_state, results_dict)
             results_dict: {agent_name: (reward, info)}
         """
-        # Map each action index → (decision_type, target_id)
-        agent_decisions = {
-            agent: self._action_to_target(act) for agent, act in actions.items()
-        }
-
-        # Write all decisions in one atomic pipeline call
+        # Write decisions via shared validator (Phase 3).
         task_id = self.task_request['task_id']
-        mapping = {'agents': ','.join(actions.keys())}
-        for agent, (dtype, tid) in agent_decisions.items():
-            mapping[f'{agent}_type']   = dtype
-            mapping[f'{agent}_target'] = tid
-
-        pipe = self.r.pipeline()
-        pipe.hset(f"task:{task_id}:decisions", mapping=mapping)
-        pipe.expire(f"task:{task_id}:decisions", 300)
-        pipe.execute()
+        agent_decisions = self.write_decisions(task_id, actions)
 
         print(f"[Redis-ENV] Decisions written: { {a: t for a, (_, t) in agent_decisions.items()} }")
 
@@ -637,12 +878,13 @@ class IoVRedisEnv:
         Returns a dict: agent_name → {'status', 'total_latency', 'energy'}.
         """
         task_id        = self.task_request['task_id']
-        key            = f"task:{task_id}:results"
         required       = {f'{a}_status' for a in agent_names}
         deadline       = time.time() + Config.REDIS_RESULT_TIMEOUT
 
         while time.time() < deadline:
-            data = self.r.hgetall(key)
+            multi_data = self.r.hgetall(f"task:{task_id}:results")
+            single_data = self.r.hgetall(f"task:{task_id}:result")
+            data = self._normalize_result_data(multi_data, single_data)
             if required.issubset(data.keys()):
                 return {
                     agent: {
@@ -700,14 +942,21 @@ class IoVRedisEnv:
         data = self.r.hgetall(f"task:{task_id}:request")
         if not data:
             return None
+        mem_footprint_bytes = float(data.get('mem_footprint_bytes', 0))
+        input_size_bytes = float(data.get('input_size_bytes', mem_footprint_bytes))
+        output_size_bytes = float(data.get('output_size_bytes', input_size_bytes * self.default_output_ratio))
+        cpu_cycles = float(data.get('cpu_cycles', 0))
         return {
             'task_id':          task_id,
             'vehicle_id':       data.get('vehicle_id', ''),
             'rsu_id':           data.get('rsu_id', self.rsu_ids[0]),
-            'mem_footprint_mb': float(data.get('mem_footprint_bytes', 0)) / (1024 * 1024),
-            'cpu_req_mcycles':  float(data.get('cpu_cycles', 0)) / 1e6,
+            'mem_footprint_mb': mem_footprint_bytes / (1024 * 1024),
+            'cpu_req_mcycles':  cpu_cycles / 1e6,
             'deadline_s':       float(data.get('deadline_seconds', 1.0)),
             'qos':              float(data.get('qos_value', 1.0)),
+            'input_size_bytes': input_size_bytes,
+            'output_size_bytes': output_size_bytes,
+            'cpu_cycles':       cpu_cycles,
             'task_type':        data.get('task_type', 'UNKNOWN'),  # for per-type TensorBoard panels
         }
 
@@ -753,31 +1002,93 @@ class IoVRedisEnv:
                 pos_y             = s.get('pos_y', 0.0),
                 speed             = s.get('speed', 0.0),
                 heading           = s.get('heading', 0.0),
+                tau_up       = s.get('tau_up', 0.0),
+                tau_comp     = s.get('tau_comp', 0.0),
+                tau_down     = s.get('tau_down', 0.0),
+                tau_total    = s.get('tau_total', 0.0),
                 distance_to_origin= s.get('distance_to_origin', 9999.0),
             )
             for s in self.candidate_states
         ]
         return self._build_state()
 
-    def write_decisions(self, task_id, actions):
+    def write_decisions(self, task_id, actions, trace_metadata=None):
         """
         Write all agent decisions to Redis atomically and return agent_decisions mapping.
         Extracted from step_multi() so it can be called without blocking on results.
         Returns: {agent_name: (decision_type, target_id)}
         """
+        current_task_id = self.task_request.get('task_id')
+        if current_task_id is not None and str(current_task_id) != str(task_id):
+            raise ValueError(
+                f"Task mismatch while writing decisions: request={current_task_id}, write={task_id}"
+            )
+
+        candidate_ids = {str(c.vehicle_id) for c in self.candidates}
+
         agent_decisions = {
             agent: self._action_to_target(act) for agent, act in actions.items()
         }
+
+        # Phase 3 guard: ensure SERVICE_VEHICLE targets are always from this task's
+        # top-K tau candidate list. If not, coerce to a safe fallback.
+        for agent, (dtype, tid) in list(agent_decisions.items()):
+            if dtype == "SERVICE_VEHICLE" and str(tid) not in candidate_ids:
+                if self.candidates:
+                    agent_decisions[agent] = ("SERVICE_VEHICLE", self.candidates[0].vehicle_id)
+                else:
+                    agent_decisions[agent] = ("RSU", self.rsu_ids[0])
+
         mapping = {'agents': ','.join(actions.keys())}
         for agent, (dtype, tid) in agent_decisions.items():
             mapping[f'{agent}_type']   = dtype
             mapping[f'{agent}_target'] = tid
 
+        # Persist validation breadcrumbs for debugging and auditability.
+        ddqn_target = agent_decisions.get('ddqn', ('RSU', self.rsu_ids[0]))[1]
+        mapping['ddqn_candidate_in_topk'] = '1' if str(ddqn_target) in candidate_ids else '0'
+        mapping['candidate_pool'] = ','.join(sorted(candidate_ids))
+
         pipe = self.r.pipeline()
         pipe.hset(f"task:{task_id}:decisions", mapping=mapping)
         pipe.expire(f"task:{task_id}:decisions", 300)
+        ddqn_type, ddqn_target = agent_decisions.get('ddqn', ('RSU', self.rsu_ids[0]))
+        single_mapping = {
+            'agent': 'ddqn',
+            'type': str(ddqn_type),
+            'target': str(ddqn_target),
+        }
+        if trace_metadata:
+            for k, v in trace_metadata.items():
+                if v is None:
+                    continue
+                single_mapping[str(k)] = str(v)
+
+        pipe.hset(f"task:{task_id}:decision", mapping=single_mapping)
+        pipe.expire(f"task:{task_id}:decision", 300)
         pipe.execute()
         return agent_decisions
+
+    @staticmethod
+    def _normalize_result_data(multi_data, single_data):
+        """
+        Normalize simulator results from either multi-agent key (task:{id}:results)
+        or single-agent key (task:{id}:result) into a common dict shape.
+        """
+        if multi_data and 'ddqn_status' in multi_data:
+            return multi_data
+
+        normalized = {}
+        if single_data and ('status' in single_data or 'ddqn_status' in single_data):
+            status = single_data.get('ddqn_status', single_data.get('status', 'FAILED'))
+            latency = single_data.get('ddqn_latency', single_data.get('total_latency', '999'))
+            energy = single_data.get('ddqn_energy', single_data.get('energy', '0.0'))
+            reason = single_data.get('ddqn_reason', single_data.get('fail_reason', 'UNKNOWN'))
+            normalized['ddqn_status'] = status
+            normalized['ddqn_latency'] = latency
+            normalized['ddqn_energy'] = energy
+            normalized['ddqn_reason'] = reason
+        return normalized
 
     def check_results_nonblocking(self, task_id, agent_names):
         """
@@ -786,8 +1097,9 @@ class IoVRedisEnv:
         can still use the ddqn result for DDQN training.
         Returns None only if ddqn hasn't reported yet.
         """
-        key  = f"task:{task_id}:results"
-        data = self.r.hgetall(key)
+        multi_data = self.r.hgetall(f"task:{task_id}:results")
+        single_data = self.r.hgetall(f"task:{task_id}:result")
+        data = self._normalize_result_data(multi_data, single_data)
         # Must have at least ddqn results to proceed
         if 'ddqn_status' not in data:
             return None
@@ -837,10 +1149,14 @@ class IoVRedisEnv:
         pipe = self.r.pipeline(transaction=False)
         for task_id in task_ids:
             pipe.hgetall(f"task:{task_id}:results")
+            pipe.hgetall(f"task:{task_id}:result")
         all_data = pipe.execute()  # single network round-trip
 
         ready = {}
-        for task_id, data in zip(task_ids, all_data):
+        for idx, task_id in enumerate(task_ids):
+            multi_data = all_data[2 * idx]
+            single_data = all_data[2 * idx + 1]
+            data = self._normalize_result_data(multi_data, single_data)
             if not data or 'ddqn_status' not in data:
                 continue
             agent_names = list(pending_dict[task_id]['actions'].keys())
