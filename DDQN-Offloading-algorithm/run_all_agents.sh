@@ -29,6 +29,14 @@ SIM_TIME="7200s"
 # (gives the simulator time to connect to Redis and write initial state)
 DRL_START_DELAY=2
 
+# Capture simulator stdout/stderr into per-run log files only when explicitly
+# enabled. The heuristic DDQN simulation is very chatty and can otherwise
+# generate multi-giabyte logs.
+CAPTURE_SIM_LOG=${CAPTURE_SIM_LOG:-0}
+
+# Capture secondary DT stdout/stderr only when explicitly enabled.
+CAPTURE_SECONDARY_DT_LOG=${CAPTURE_SECONDARY_DT_LOG:-0}
+
 # ── Agents to run ────────────────────────────────────────────────────────────
 # Format: "agent_name:SimulationConfig"
 # Comment out any line to skip that run.
@@ -216,11 +224,21 @@ _start_secondary_dt() {
     fi
 
     local secondary_log="${SIM_LOG_DIR}/secondary_dt_${sim_cfg}_${agent}.log"
+    local secondary_output_target="/dev/null"
+
+    if [ "${CAPTURE_SECONDARY_DT_LOG}" -eq 1 ]; then
+        secondary_output_target="${secondary_log}"
+    fi
+
     _info "Starting secondary DT for tau-enabled run"
-    _info "  Secondary DT log: ${secondary_log}"
+    if [ "${CAPTURE_SECONDARY_DT_LOG}" -eq 1 ]; then
+        _info "  Secondary DT log: ${secondary_log}"
+    else
+        _info "  Secondary DT log: disabled (set CAPTURE_SECONDARY_DT_LOG=1 to capture)"
+    fi
     (
         cd "${SIM_DIR}" || exit 1
-        exec "${SECONDARY_DT_SCRIPT}" > "${secondary_log}" 2>&1
+        exec "${SECONDARY_DT_SCRIPT}" > "${secondary_output_target}" 2>&1
     ) &
     _SECONDARY_PID=$!
     _ok "Secondary DT started (PID: ${_SECONDARY_PID})"
@@ -291,6 +309,11 @@ run_one() {
     # ── Log paths for this run ──────────────────────────────────────────────
     local sim_log="${SIM_LOG_DIR}/sim_output_single_agent_${sim_cfg}_${agent}.log"
     local drl_log="${DRL_LOG_DIR}/drl_output_single_agent_${sim_cfg}_${agent}.log"
+    local sim_output_target="/dev/null"
+
+    if [ "${CAPTURE_SIM_LOG}" -eq 1 ]; then
+        sim_output_target="${sim_log}"
+    fi
 
     # ── Flush Redis ─────────────────────────────────────────────────────────
     flush_redis
@@ -301,13 +324,17 @@ run_one() {
 
     # ── Start simulation ────────────────────────────────────────────────────
     _info "Starting simulation  [config=${sim_cfg}, time=${SIM_TIME}]"
-    _info "  Sim log: ${sim_log}"
+    if [ "${CAPTURE_SIM_LOG}" -eq 1 ]; then
+        _info "  Sim log: ${sim_log}"
+    else
+        _info "  Sim log: disabled (set CAPTURE_SIM_LOG=1 to capture)"
+    fi
     local sim_start_epoch
     sim_start_epoch=$(date +%s)
     (
         cd "${SIM_DIR}" || exit 1
         exec ./run_simulation.sh -u Cmdenv -c "${sim_cfg}" --sim-time-limit="${SIM_TIME}" \
-            > "${sim_log}" 2>&1
+            > "${sim_output_target}" 2>&1
     ) &
     _SIM_PID=$!
     _ok "Simulation started (PID: ${_SIM_PID})"
@@ -323,7 +350,11 @@ run_one() {
     if ! kill -0 "${_SIM_PID}" 2>/dev/null; then
         local sim_dur=$(( $(date +%s) - sim_start_epoch ))
         _error "Simulation exited after ${sim_dur}s (before DRL was started) — likely a crash."
-        _error "Check sim log for errors: ${sim_log}"
+        if [ "${CAPTURE_SIM_LOG}" -eq 1 ]; then
+            _error "Check sim log for errors: ${sim_log}"
+        else
+            _error "Re-run with CAPTURE_SIM_LOG=1 to capture simulator output for debugging."
+        fi
         _warn "Skipping DRL launch for this run."
         _stop_secondary_dt
         _SIM_PID=""
