@@ -34,13 +34,14 @@ DRL_START_DELAY=2
 # Comment out any line to skip that run.
 #
 # agent_name must be one of:
-#   ddqn | vanilla_dqn | random | greedy_compute |
+#   ddqn | ddqn_no_tau | vanilla_dqn | random | greedy_compute |
 #   min_latency | least_queue | greedy_distance | local
 #
 # SimulationConfig must match a [Config ...] section in omnetpp.ini:
 #   Heuristic | AllOffload | AllLocal
 RUNS=(
     "ddqn:Heuristic"
+    "ddqn_no_tau:Heuristic"
     "vanilla_dqn:Heuristic"
     "random:Heuristic"
     "greedy_compute:Heuristic"
@@ -70,6 +71,7 @@ COMPARE_METRICS=(reward latency energy success_rate qos failure)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRL_DIR="${SCRIPT_DIR}"
 SIM_DIR="/opt/omnet/omnetpp-6.1/workspace/IoV-Digital-Twin-TaskOffloading"
+SECONDARY_DT_SCRIPT="${SIM_DIR}/run_secondary_dt.sh"
 REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 
 DRL_LOG_DIR="${DRL_DIR}/logs/${RUN_LABEL}"
@@ -108,11 +110,13 @@ _section() { echo -e "\n${C_BOLD}═══════════════�
 # Active PIDs — used by the SIGINT trap for cleanup
 _SIM_PID=""
 _DRL_PID=""
+_SECONDARY_PID=""
 
 _cleanup() {
     echo ""
     _warn "Interrupted — cleaning up active processes..."
     [ -n "${_SIM_PID}" ] && kill "${_SIM_PID}" 2>/dev/null && _info "Killed sim PID ${_SIM_PID}"
+    [ -n "${_SECONDARY_PID}" ] && kill "${_SECONDARY_PID}" 2>/dev/null && _info "Killed secondary DT PID ${_SECONDARY_PID}"
     [ -n "${_DRL_PID}" ] && kill -SIGINT "${_DRL_PID}" 2>/dev/null && wait "${_DRL_PID}" 2>/dev/null \
         && _info "DRL PID ${_DRL_PID} stopped"
     exit 1
@@ -189,6 +193,47 @@ _stop_drl_gracefully() {
     fi
 }
 
+_agent_uses_tau() {
+    local agent="$1"
+    [[ "$agent" != "ddqn_no_tau" ]]
+}
+
+_start_secondary_dt() {
+    local agent="$1"
+    local sim_cfg="$2"
+
+    if ! _agent_uses_tau "$agent"; then
+        return 0
+    fi
+
+    if [ ! -x "${SECONDARY_DT_SCRIPT}" ]; then
+        _warn "Secondary DT script not executable: ${SECONDARY_DT_SCRIPT}"
+        return 0
+    fi
+
+    local secondary_log="${SIM_LOG_DIR}/secondary_dt_${sim_cfg}_${agent}.log"
+    _info "Starting secondary DT for tau-enabled run"
+    _info "  Secondary DT log: ${secondary_log}"
+    (
+        cd "${SIM_DIR}" || exit 1
+        exec "${SECONDARY_DT_SCRIPT}" > "${secondary_log}" 2>&1
+    ) &
+    _SECONDARY_PID=$!
+    _ok "Secondary DT started (PID: ${_SECONDARY_PID})"
+}
+
+_stop_secondary_dt() {
+    if [ -z "${_SECONDARY_PID}" ]; then
+        return 0
+    fi
+    if kill -0 "${_SECONDARY_PID}" 2>/dev/null; then
+        _info "Stopping secondary DT (PID: ${_SECONDARY_PID})"
+        kill -SIGINT "${_SECONDARY_PID}" 2>/dev/null || true
+        wait "${_SECONDARY_PID}" 2>/dev/null || true
+    fi
+    _SECONDARY_PID=""
+}
+
 # ─── move_new_results ─────────────────────────────────────────────────────────
 # Move any *.json files in results/ that are newer than the reference file
 # into the per-run subdirectory.
@@ -243,6 +288,9 @@ run_one() {
     _SIM_PID=$!
     _ok "Simulation started (PID: ${_SIM_PID})"
 
+    # ── Start secondary DT (tau-enabled agents only) ──────────────────────
+    _start_secondary_dt "${agent}" "${sim_cfg}"
+
     # ── Wait before launching DRL ───────────────────────────────────────────
     _info "Waiting ${DRL_START_DELAY}s for simulator to initialise Redis..."
     sleep "${DRL_START_DELAY}"
@@ -253,6 +301,7 @@ run_one() {
         _error "Simulation exited after ${sim_dur}s (before DRL was started) — likely a crash."
         _error "Check sim log for errors: ${sim_log}"
         _warn "Skipping DRL launch for this run."
+        _stop_secondary_dt
         _SIM_PID=""
         rm -f "${ref_file}"
         return 1
@@ -285,6 +334,8 @@ run_one() {
     else
         _ok "Simulation finished normally after ${sim_dur}s"
     fi
+
+    _stop_secondary_dt
 
     # Stop DRL whether sim succeeded or crashed (results may still be partial)
     _stop_drl_gracefully "${_DRL_PID}"
@@ -338,6 +389,7 @@ for entry in "${RUNS[@]}"; do
         FAILED_RUNS+=("${agent}:${sim_cfg}")
         # Ensure processes are dead before next run
         [ -n "${_SIM_PID}" ] && kill "${_SIM_PID}" 2>/dev/null; _SIM_PID=""
+        [ -n "${_SECONDARY_PID}" ] && kill "${_SECONDARY_PID}" 2>/dev/null; _SECONDARY_PID=""
         [ -n "${_DRL_PID}" ] && kill "${_DRL_PID}" 2>/dev/null; _DRL_PID=""
     fi
 

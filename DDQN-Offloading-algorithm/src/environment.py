@@ -308,7 +308,7 @@ class IoVRedisEnv:
         WRITES: Redis  — offloading decision for the simulator to pick up
     """
 
-    def __init__(self, redis_db: int = 0, instance_id: int = 0):
+    def __init__(self, redis_db: int = 0, instance_id: int = 0, tau_enabled: bool = True):
         self.instance_id = instance_id
         self.r = redis.Redis(
             host=Config.REDIS_HOST,
@@ -334,6 +334,7 @@ class IoVRedisEnv:
         self.rate_efficiency = Config.LINK_RATE_EFFICIENCY
         self.default_output_ratio = Config.TASK_OUTPUT_RATIO
         self.default_tau_penalty_s = Config.TAU_MISSING_PENALTY_S
+        self.tau_enabled = bool(tau_enabled)
 
         # Episode state
         self.task_request     = {}   # raw dict from Redis request hash
@@ -594,6 +595,14 @@ class IoVRedisEnv:
     def _attach_tau_to_candidates(self, source_vehicle, states):
         """Phase 2 core: compute tau for already-selected top-K closest candidates."""
         if not states:
+            return states
+
+        if not self.tau_enabled:
+            for state in states:
+                state['tau_up'] = 0.0
+                state['tau_comp'] = 0.0
+                state['tau_down'] = 0.0
+                state['tau_total'] = 0.0
             return states
 
         cycle_id = self._get_latest_q_cycle()

@@ -89,7 +89,7 @@ def _rolling_mean(data, key, window=50):
 # ---------------------------------------------------------------------------
 
 def _create_agent(agent_name, load_path=None):
-    if agent_name == 'ddqn':
+    if agent_name in ('ddqn', 'ddqn_no_tau'):
         agent = DDQNAgent()
         initial_ep = 0
         if load_path:
@@ -116,7 +116,7 @@ def _create_agent(agent_name, load_path=None):
 
 def _select_action(agent, agent_name, state, mask, env, request):
     """Dispatch select_action for different agent interfaces."""
-    if agent_name in ('ddqn', 'vanilla_dqn'):
+    if agent_name in ('ddqn', 'ddqn_no_tau', 'vanilla_dqn'):
         return agent.select_action(state, mask=mask)
     elif agent_name == 'random':
         return agent.select_action(mask)
@@ -152,13 +152,17 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     rsu_id   = instance_cfg['rsu_id']
 
     log_dir    = os.path.join(Config.LOG_DIR, f"{agent_name}_{offload_mode}", f"instance_{iid}")
-    model_path = os.path.join(Config.BASE_DIR, "models", f"ddqn_rsu{iid}.pth")
+    model_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     os.makedirs(os.path.join(Config.BASE_DIR, "results"), exist_ok=True)
 
     writer = SummaryWriter(log_dir=log_dir)
-    env    = IoVRedisEnv(redis_db=redis_db, instance_id=iid)
+    env    = IoVRedisEnv(
+        redis_db=redis_db,
+        instance_id=iid,
+        tau_enabled=(agent_name != 'ddqn_no_tau')
+    )
     if resume_training and not load_path:
         default_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
         if os.path.exists(default_path):
@@ -168,7 +172,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     agent  = _create_agent(agent_name, load_path=load_path)
 
     # DRL-agent reference for training (None for heuristic baselines)
-    ddqn_agent = agent if agent_name in ('ddqn', 'vanilla_dqn') else None
+    ddqn_agent = agent if agent_name in ('ddqn', 'ddqn_no_tau', 'vanilla_dqn') else None
 
     TIMEOUT             = Config.REDIS_RESULT_TIMEOUT
     TRAIN_EVERY         = 4
@@ -539,7 +543,7 @@ def run():
     parser.add_argument('--env', type=str, default='dummy', choices=['dummy', 'redis'],
                         help='Environment type: dummy or redis')
     parser.add_argument('--agent', type=str, default=None,
-                        choices=['ddqn', 'vanilla_dqn', 'random', 'greedy_compute',
+                        choices=['ddqn', 'ddqn_no_tau', 'vanilla_dqn', 'random', 'greedy_compute',
                                  'min_latency', 'least_queue', 'greedy_distance', 'local'],
                         help='Agent type (required for --env redis)')
     parser.add_argument('--load_model', type=str, default=None,
@@ -551,7 +555,7 @@ def run():
     if args.env == 'redis':
         if args.agent is None:
             print("[ERROR] --agent is required when using --env redis")
-            print("  choices: ddqn, vanilla_dqn, random, greedy_compute, "
+            print("  choices: ddqn, ddqn_no_tau, vanilla_dqn, random, greedy_compute, "
                   "min_latency, least_queue, greedy_distance, local")
             return
 
