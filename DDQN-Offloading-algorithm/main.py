@@ -395,7 +395,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                 completions_since_train = 0
 
             # ── 6. Periodic console log + model save ──────────────────────────
-            if episode > 0 and episode % 50 == 0 and episode != last_logged_episode:
+            if episode > 0 and episode % 10 == 0 and episode != last_logged_episode:
                 last_logged_episode = episode
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 sr = _success_rate(all_successes)
