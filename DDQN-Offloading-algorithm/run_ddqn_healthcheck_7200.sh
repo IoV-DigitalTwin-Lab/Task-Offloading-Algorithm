@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRL_DIR="${SCRIPT_DIR}"
-SIM_DIR="/opt/omnet/omnetpp-6.1/workspace2/IoV-Digital-Twin-TaskOffloading"
+SIM_DIR="/opt/omnet/omnetpp-6.1/workspace/IoV-Digital-Twin-TaskOffloading"
 REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 
 RUN_LABEL="ddqn_7200_healthcheck_$(date +%Y%m%d_%H%M%S)"
