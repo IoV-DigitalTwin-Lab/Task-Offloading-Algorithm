@@ -802,7 +802,7 @@ run_one() {
     _info "Starting DRL agent  [agent=${agent}]"
     _info "  DRL log: ${drl_log}"
     local drl_extra_args=()
-    if [ "${agent}" = "ddqn" ] || [ "${agent}" = "vanilla_dqn" ]; then
+    if [ "${agent}" = "ddqn" ] || [ "${agent}" = "ddqn_no_tau" ] || [ "${agent}" = "vanilla_dqn" ]; then
         drl_extra_args+=(--resume_training)
         _info "  Continuous training enabled: existing ${agent} model checkpoints will be reused if found"
     fi
