@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/testearlymorning_all_heuristic"
+        "log_dir": "output/test_all_heuristic"
     },
     "rewards": {
         "reward_success": 15,
