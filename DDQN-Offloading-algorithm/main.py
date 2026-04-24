@@ -89,7 +89,7 @@ def _rolling_mean(data, key, window=50):
 # ---------------------------------------------------------------------------
 
 def _create_agent(agent_name, load_path=None):
-    if agent_name == 'ddqn':
+    if agent_name in ('ddqn', 'ddqn_no_tau'):
         agent = DDQNAgent()
         initial_ep = 0
         if load_path:
@@ -97,7 +97,12 @@ def _create_agent(agent_name, load_path=None):
         agent.global_step = initial_ep
         return agent
     elif agent_name == 'vanilla_dqn':
-        return VanillaDQNAgent()
+        agent = VanillaDQNAgent()
+        initial_ep = 0
+        if load_path:
+            initial_ep = agent.load_model(load_path) or 0
+        agent.global_step = initial_ep
+        return agent
     elif agent_name == 'random':
         return RandomAgent()
     elif agent_name == 'greedy_compute':
@@ -116,7 +121,7 @@ def _create_agent(agent_name, load_path=None):
 
 def _select_action(agent, agent_name, state, mask, env, request):
     """Dispatch select_action for different agent interfaces."""
-    if agent_name in ('ddqn', 'vanilla_dqn'):
+    if agent_name in ('ddqn', 'ddqn_no_tau', 'vanilla_dqn'):
         return agent.select_action(state, mask=mask)
     elif agent_name == 'random':
         return agent.select_action(mask)
@@ -152,13 +157,17 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     rsu_id   = instance_cfg['rsu_id']
 
     log_dir    = os.path.join(Config.LOG_DIR, f"{agent_name}_{offload_mode}", f"instance_{iid}")
-    model_path = os.path.join(Config.BASE_DIR, "models", f"ddqn_rsu{iid}.pth")
+    model_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     os.makedirs(os.path.join(Config.BASE_DIR, "results"), exist_ok=True)
 
     writer = SummaryWriter(log_dir=log_dir)
-    env    = IoVRedisEnv(redis_db=redis_db, instance_id=iid)
+    env    = IoVRedisEnv(
+        redis_db=redis_db,
+        instance_id=iid,
+        tau_enabled=(agent_name != 'ddqn_no_tau')
+    )
     if resume_training and not load_path:
         default_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")
         if os.path.exists(default_path):
@@ -168,7 +177,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     agent  = _create_agent(agent_name, load_path=load_path)
 
     # DRL-agent reference for training (None for heuristic baselines)
-    ddqn_agent = agent if agent_name in ('ddqn', 'vanilla_dqn') else None
+    ddqn_agent = agent if agent_name in ('ddqn', 'ddqn_no_tau', 'vanilla_dqn') else None
 
     TIMEOUT             = Config.REDIS_RESULT_TIMEOUT
     TRAIN_EVERY         = 4
@@ -180,6 +189,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     # Per-task-type rolling data (all tasks combined)
     lat_by_type  = defaultdict(list)   # task_type → [latency, ...]
     ene_by_type  = defaultdict(list)   # task_type → [energy, ...]
+    succ_by_type = defaultdict(list)   # task_type → [0/1 success, ...]
 
     offload_rewards   = []   # only for ddqn
     offload_successes = []
@@ -232,16 +242,33 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                     request = env._poll_request_nonblocking()
                     if request is None:
                         break
-
                     _offload_drained += 1
+                    dequeued_wall_s = time.time()
+
                     state = env.setup_from_request(request)
                     if state is None:
-                        # Vehicle state missing: fall back to the RSU that received the task
-                        # (not always RSU_0 — the vehicle may be served by a different RSU)
+                        # Vehicle state missing: fall back to the RSU that received the task.
+                        now_wall_s = time.time()
+                        pipe = env.r.pipeline()
                         req_rsu = request.get('rsu_id', env.rsu_ids[0])
                         fallback_action = (env.rsu_ids.index(req_rsu)
                                            if req_rsu in env.rsu_ids else 0)
                         env.write_decision(request['task_id'], fallback_action, agent_name)
+                        pipe.hset(
+                            f"task:{request['task_id']}:decision",
+                            mapping={
+                                'agent': agent_name,
+                                'type': 'RSU',
+                                'target': req_rsu,
+                                'drl_instance_id': iid,
+                                'rsu_id': rsu_id,
+                                'drl_dequeued_wall_s': dequeued_wall_s,
+                                'drl_state_ready_wall_s': now_wall_s,
+                                'drl_decision_written_wall_s': now_wall_s,
+                            },
+                        )
+                        pipe.expire(f"task:{request['task_id']}:decision", 300)
+                        pipe.execute()
                         print(f"[{agent_name}-{iid}] Task {request['task_id']}: "
                               f"vehicle state missing — fallback to RSU {req_rsu} "
                               f"(action {fallback_action})")
@@ -251,7 +278,14 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                     action = _select_action(agent, agent_name, state, mask, env, request)
                     dec    = env.write_decision(request['task_id'], action, agent_name)
                     task_type = getattr(env, 'task_type', 'UNKNOWN')
-
+                    decision_written_wall_s = time.time()
+                    trace_metadata = {
+                        'drl_instance_id': iid,
+                        'rsu_id': rsu_id,
+                        'drl_dequeued_wall_s': dequeued_wall_s,
+                        'drl_state_ready_wall_s': decision_written_wall_s,
+                        'drl_decision_written_wall_s': decision_written_wall_s,
+                    }
                     pending[request['task_id']] = {
                         'state':         state,
                         'action':        action,
@@ -266,6 +300,15 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
             _now = time.time()
             for tid in list(pending.keys()):
                 if _now - pending[tid]['timestamp'] > TIMEOUT:
+                    env.r.hset(
+                        f"task:{tid}:decision",
+                        mapping={
+                            'drl_result_timeout_discard_wall_s': _now,
+                            'drl_result_timeout_s': TIMEOUT,
+                        },
+                    )
+                    env.r.expire(f"task:{tid}:decision", 300)
+                    print(f"[DRL-{iid}] Task {tid} timed out — discarding")
                     pending.pop(tid)
                     timeout_count += 1
 
@@ -282,6 +325,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
                 lat_by_type[ttype].append(latency)
                 ene_by_type[ttype].append(energy)
+                succ_by_type[ttype].append(1 if success else 0)
                 offload_successes.append(1 if success else 0)
                 all_successes.append(1 if success else 0)
                 decision_types.append(entry['decision_type'])
@@ -331,6 +375,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
 
                 lat_by_type[ttype].append(latency)
                 ene_by_type[ttype].append(energy)
+                succ_by_type[ttype].append(1 if success else 0)
                 local_successes.append(1 if success else 0)
                 all_successes.append(1 if success else 0)
                 all_fail_reasons.append(reason)
@@ -412,6 +457,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                                                         transform=lambda w: sum(w)/len(w)*100),
             "latencies":          {t: lat_by_type[t] for t in TASK_TYPES},
             "energies":           {t: ene_by_type[t] for t in TASK_TYPES},
+            "task_type_successes": {t: succ_by_type[t] for t in TASK_TYPES},
             "failure_reasons":    dict(fail_counts),
             "qos_success_rates": {
                 f"qos{q}": _build_rolling_series(
@@ -506,7 +552,7 @@ def run():
     parser.add_argument('--env', type=str, default='dummy', choices=['dummy', 'redis'],
                         help='Environment type: dummy or redis')
     parser.add_argument('--agent', type=str, default=None,
-                        choices=['ddqn', 'vanilla_dqn', 'random', 'greedy_compute',
+                        choices=['ddqn', 'ddqn_no_tau', 'vanilla_dqn', 'random', 'greedy_compute',
                                  'min_latency', 'least_queue', 'greedy_distance', 'local'],
                         help='Agent type (required for --env redis)')
     parser.add_argument('--load_model', type=str, default=None,
@@ -518,7 +564,7 @@ def run():
     if args.env == 'redis':
         if args.agent is None:
             print("[ERROR] --agent is required when using --env redis")
-            print("  choices: ddqn, vanilla_dqn, random, greedy_compute, "
+            print("  choices: ddqn, ddqn_no_tau, vanilla_dqn, random, greedy_compute, "
                   "min_latency, least_queue, greedy_distance, local")
             return
 

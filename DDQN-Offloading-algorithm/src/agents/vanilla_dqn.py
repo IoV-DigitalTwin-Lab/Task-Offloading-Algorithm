@@ -149,5 +149,25 @@ class VanillaDQNAgent:
         # No-op: VanillaDQN uses hard updates on a fixed schedule inside train()
         pass
 
-    def save_model(self, path):
-        torch.save(self.policy_net.state_dict(), path)
+    def save_model(self, path, global_step=0):
+        checkpoint = {
+            'model_state_dict': self.policy_net.state_dict(),
+            'epsilon': self.epsilon,
+            'global_step': global_step,
+        }
+        torch.save(checkpoint, path)
+
+    def load_model(self, path):
+        checkpoint = torch.load(path, map_location=Config.DEVICE)
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            self.policy_net.load_state_dict(checkpoint['model_state_dict'])
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+            self.epsilon = checkpoint.get('epsilon', self.epsilon)
+            step = checkpoint.get('global_step', 0)
+            print(f"[VanillaDQNAgent] Loaded checkpoint from {path} (Step: {step}, Epsilon: {self.epsilon:.3f})")
+            return step
+
+        self.policy_net.load_state_dict(checkpoint)
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        print(f"[VanillaDQNAgent] Loaded legacy model from {path}")
+        return 0

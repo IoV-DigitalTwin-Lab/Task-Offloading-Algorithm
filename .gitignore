@@ -19,3 +19,4 @@ DDQN-Offloading-algorithm/output/*
 DDQN-Offloading-algorithm/logs/*
 DDQN-Offloading-algorithm/*.log
 DDQN-Offloading-algorithm/results/*
+DDQN-Offloading-algorithm/.env

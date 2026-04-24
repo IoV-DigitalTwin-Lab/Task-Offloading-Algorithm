@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/ddqn_7200_healthcheck_20260420_062754"
+        "log_dir": "output/test_all_heuristic"
     },
     "rewards": {
         "reward_success": 15,
@@ -19,10 +19,10 @@
         "lr": 0.0001,
         "gamma": 0.99,
         "tau": 0.005,
-        "epsilon_start": 1.0,
+        "epsilon_start": 0.4,
         "epsilon_end": 0.02,
-        "epsilon_decay": 0.9997,
-        "batch_size": 256,
+        "epsilon_decay": 0.995,
+        "batch_size": 128,
         "memory_size": 100000,
         "per_alpha": 0.6,
         "per_beta": 0.4
@@ -33,7 +33,14 @@
         "poll_interval": 0.05,
         "result_timeout": 60.0,
         "num_rsus": 3,
-        "max_neighbors": 5,
+        "max_neighbors": 12,
+        "dt2_run_id": "DT-Secondary-MotionChannel",
+        "q_cycle_scan_limit": 50000,
+        "prediction_step_s": 0.02,
+        "link_bandwidth_hz": 10000000,
+        "link_rate_efficiency": 0.8,
+        "task_output_ratio": 0.25,
+        "tau_missing_penalty_s": 5.0,
         "rsu_ids": [
             "RSU_0",
             "RSU_1",
@@ -78,7 +85,11 @@
                 "queue_length",
                 "speed",
                 "heading",
-                "distance_to_origin"
+                "distance_to_origin",
+                "tau_up",
+                "tau_comp",
+                "tau_down",
+                "tau_total"
             ]
         },
         "normalization": {
@@ -100,7 +111,11 @@
                 "queue_length": 10.0,
                 "speed": 25.0,
                 "heading": 360.0,
-                "distance_to_origin": 1000.0
+                "distance_to_origin": 1000.0,
+                "tau_up": 5.0,
+                "tau_comp": 5.0,
+                "tau_down": 5.0,
+                "tau_total": 15.0
             }
         }
     }
