@@ -22,7 +22,7 @@
 #   • Results subdirectory:  results/<RUN_LABEL>/
 #   • TensorBoard subdirectory in configs/redis_config.json:
 #       system.log_dir = output/<RUN_LABEL>
-RUN_LABEL="${RUN_LABEL:-test_all_heuristic}"
+RUN_LABEL="${RUN_LABEL:-testnight_all_heuristic}"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
 SIM_TIME="7200s"
@@ -390,7 +390,7 @@ _stop_drl_gracefully() {
 
 _agent_uses_tau() {
     local agent="$1"
-    [[ "$agent" != "ddqn_no_tau" ]]
+    [[ "$agent" == "ddqn" ]]
 }
 
 _start_secondary_dt() {
@@ -858,7 +858,7 @@ run_one() {
     _info "Starting DRL agent  [agent=${agent}]"
     _info "  DRL log: ${drl_log}"
     local drl_extra_args=()
-    if [ "${agent}" = "ddqn" ] || [ "${agent}" = "vanilla_dqn" ]; then
+    if [ "${agent}" = "ddqn" ] || [ "${agent}" = "ddqn_no_tau" ] || [ "${agent}" = "vanilla_dqn" ]; then
         drl_extra_args+=(--resume_training)
         _info "  Continuous training enabled: existing ${agent} model checkpoints will be reused if found"
     fi
