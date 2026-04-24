@@ -2,14 +2,22 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+if [ -f "${ENV_FILE}" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
+
 DRL_DIR="${SCRIPT_DIR}"
-SIM_DIR="/opt/omnet/omnetpp-6.1/workspace/IoV-Digital-Twin-TaskOffloading"
+SIM_DIR="${SIM_DIR:-/opt/omnet/omnetpp-6.1/workspace-mihi/IoV-Digital-Twin-TaskOffloading}"
 REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 
-RUN_LABEL="ddqn_7200_healthcheck_$(date +%Y%m%d_%H%M%S)"
+RUN_LABEL="${RUN_LABEL:-ddqn_7200_healthcheck_$(date +%Y%m%d_%H%M%S)}"
 SIM_TIME="7200s"
 DRL_START_DELAY=2
-REDIS_DBS=(4 5 6)
+REDIS_DBS=(0 1 2)
 DRL_SHUTDOWN_TIMEOUT=30
 
 DRL_LOG_DIR="${DRL_DIR}/logs/${RUN_LABEL}"

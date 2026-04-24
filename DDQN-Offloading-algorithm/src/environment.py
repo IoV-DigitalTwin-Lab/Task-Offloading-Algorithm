@@ -4,9 +4,11 @@ import random
 import time
 import types
 import json
+import os
 import redis
 from src.config import Config
 from src.entities import Vehicle, Task, RSU
+from src.local_env import get_env_int
 
 class IoVDummyEnv:
     def __init__(self):
@@ -308,7 +310,8 @@ class IoVRedisEnv:
         WRITES: Redis  — offloading decision for the simulator to pick up
     """
 
-    def __init__(self, redis_db: int = 0, instance_id: int = 0, tau_enabled: bool = True):
+    def __init__(self, redis_db: int | None = None, instance_id: int = 0, tau_enabled: bool = True):
+        redis_db = get_env_int("DEFAULT_REDIS_DB", 0) if redis_db is None else redis_db
         self.instance_id = instance_id
         self.r = redis.Redis(
             host=Config.REDIS_HOST,

@@ -2,7 +2,7 @@
     "system": {
         "device": "auto",
         "seed": 42,
-        "log_dir": "output/new_all_heuristic"
+        "log_dir": "output/testearlymorning_all_heuristic"
     },
     "rewards": {
         "reward_success": 15,
@@ -50,19 +50,19 @@
             {
                 "instance_id": 0,
                 "rsu_id": "RSU_0",
-                "redis_db": 4,
+                "redis_db": 0,
                 "active": true
             },
             {
                 "instance_id": 1,
                 "rsu_id": "RSU_1",
-                "redis_db": 5,
+                "redis_db": 1,
                 "active": true
             },
             {
                 "instance_id": 2,
                 "rsu_id": "RSU_2",
-                "redis_db": 6,
+                "redis_db": 2,
                 "active": true
             }
         ],

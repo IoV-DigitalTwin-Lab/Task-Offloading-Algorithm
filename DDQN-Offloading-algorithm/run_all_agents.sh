@@ -11,6 +11,15 @@
 # Edit the USER CONFIGURATION section below before running.
 # =============================================================================
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+if [ -f "${ENV_FILE}" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+    set +a
+fi
+
 # =============================================================================
 # USER CONFIGURATION — edit this section
 # =============================================================================
@@ -22,7 +31,7 @@
 #   • Results subdirectory:  results/<RUN_LABEL>/
 #   • TensorBoard subdirectory in configs/redis_config.json:
 #       system.log_dir = output/<RUN_LABEL>
-RUN_LABEL="test1_all_heuristic"
+RUN_LABEL="${RUN_LABEL:-testlatenight_all_heuristic}"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
 SIM_TIME="7200s"
@@ -66,7 +75,10 @@ SELECTED_AGENTS=("$@")
 # ── Redis databases to flush before each run ─────────────────────────────────
 # Must match the "redis_db" values of active=true instances in
 # configs/redis_config.json  (currently: db 4, db 5, db 6)
-REDIS_DBS=(4 5 6)
+# Loaded from .env when present; fallback is applied below.
+if ! declare -p REDIS_DBS >/dev/null 2>&1 || [ ${#REDIS_DBS[@]} -eq 0 ]; then
+    REDIS_DBS=(4 5 6)
+fi
 
 # ── compare.py settings ──────────────────────────────────────────────────────
 # Output image path (relative to the DRL project directory)
@@ -87,9 +99,8 @@ TARGET_SUCCESS_GAIN_PCT=7.0
 # PATHS — usually no need to edit below this line
 # =============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRL_DIR="${SCRIPT_DIR}"
-SIM_DIR="/opt/omnet/omnetpp-6.1/workspace/IoV-Digital-Twin-TaskOffloading"
+SIM_DIR="${SIM_DIR:-/opt/omnet/omnetpp-6.1/workspace2/IoV-Digital-Twin-TaskOffloading}"
 SECONDARY_DT_SCRIPT="${SIM_DIR}/run_secondary_dt.sh"
 REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 
@@ -254,6 +265,53 @@ PY
 # Send SIGINT to the DRL process and wait up to DRL_SHUTDOWN_TIMEOUT seconds.
 # Force-kills if it does not exit in time.
 #   $1 = DRL PID
+# Rewrites configs/redis_config.json so active agent_instances use the DBs
+# configured in REDIS_DBS (typically provided via .env).
+update_redis_instance_dbs() {
+    _info "Setting redis_config active agent DBs to: ${REDIS_DBS[*]}"
+
+    if python3 - "${REDIS_CONFIG_PATH}" "${REDIS_DBS[@]}" <<'PY'
+import json
+import sys
+
+config_path = sys.argv[1]
+db_values = [int(v) for v in sys.argv[2:]]
+
+if not db_values:
+    raise ValueError("No REDIS_DBS values were provided")
+
+with open(config_path, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+redis_cfg = cfg.get("redis")
+if not isinstance(redis_cfg, dict):
+    raise KeyError("Missing object: redis")
+
+instances = redis_cfg.get("agent_instances")
+if not isinstance(instances, list):
+    raise KeyError("Missing array: redis.agent_instances")
+
+active_instances = [inst for inst in instances if inst.get("active", True)]
+if len(db_values) < len(active_instances):
+    raise ValueError(
+        f"REDIS_DBS has {len(db_values)} entries but {len(active_instances)} active agent_instances exist"
+    )
+
+for idx, inst in enumerate(active_instances):
+    inst["redis_db"] = db_values[idx]
+
+with open(config_path, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=4)
+    f.write("\n")
+PY
+    then
+        _ok "Updated redis agent DB mappings in ${REDIS_CONFIG_PATH}"
+    else
+        _error "Failed to update redis agent DB mappings in ${REDIS_CONFIG_PATH}"
+        exit 1
+    fi
+}
+
 _stop_drl_gracefully() {
     local pid="$1"
     _info "Sending SIGINT to DRL agent (waiting up to ${DRL_SHUTDOWN_TIMEOUT}s for clean shutdown)..."
@@ -806,8 +864,9 @@ fi
 
 build_selected_runs || exit 1
 
-_section "run_all_agents.sh — RUN_LABEL=${RUN_LABEL}"
+_section "run_all_agents.sh — RUN_LABEL="
 update_redis_log_dir
+update_redis_instance_dbs
 echo "  Runs planned : ${#FILTERED_RUNS[@]}"
 echo "  Agents       : ${SELECTED_AGENTS[*]:-all}"
 echo "  Sim time     : ${SIM_TIME}"

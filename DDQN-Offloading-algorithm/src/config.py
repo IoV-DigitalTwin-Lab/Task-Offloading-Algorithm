@@ -2,10 +2,15 @@ import torch
 import os
 import json
 import sys
+from src.local_env import load_project_env, get_env_int, get_env_bool
+
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_project_env(BASE_DIR)
 
 class Config:
     # --- Paths ---
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BASE_DIR = BASE_DIR
 
     # Default values (overwritten by load_config)
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, "models", "best_ddqn_model.pth")
@@ -59,7 +64,12 @@ class Config:
     # --- Redis Settings (populated by load_config when using redis_config.json) ---
     NUM_RSUS       = 3
     RSU_IDS        = ["RSU_0", "RSU_1", "RSU_2"]
-    DRL_INSTANCES  = [{"instance_id": 0, "rsu_id": "RSU_0", "redis_db": 0, "active": True}]
+    DRL_INSTANCES  = [{
+        "instance_id": get_env_int("DRL_INSTANCE_ID", 0),
+        "rsu_id": os.getenv("DRL_RSU_ID", "RSU_0"),
+        "redis_db": get_env_int("DEFAULT_REDIS_DB", 0),
+        "active": get_env_bool("DRL_INSTANCE_ACTIVE", True),
+    }]
     REDIS_HOST           = "127.0.0.1"
     REDIS_PORT           = 6379
     REDIS_POLL_INTERVAL  = 0.05
@@ -202,7 +212,12 @@ class Config:
             cls.REDIS_NORMALIZATION  = _redis.get("normalization", {})
             cls.DRL_INSTANCES        = _redis.get("agent_instances",
                                          _redis.get("drl_instances", [  # fallback for old configs
-                {"instance_id": 0, "rsu_id": cls.RSU_IDS[0], "redis_db": 0, "active": True}
+                {
+                    "instance_id": get_env_int("DRL_INSTANCE_ID", 0),
+                    "rsu_id": os.getenv("DRL_RSU_ID", cls.RSU_IDS[0]),
+                    "redis_db": get_env_int("DEFAULT_REDIS_DB", 0),
+                    "active": get_env_bool("DRL_INSTANCE_ACTIVE", True),
+                }
             ]))
 
             # Recompute state/action dims for redis mode
