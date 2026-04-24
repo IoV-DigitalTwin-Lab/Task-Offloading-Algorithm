@@ -166,7 +166,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
     env    = IoVRedisEnv(
         redis_db=redis_db,
         instance_id=iid,
-        tau_enabled=(agent_name != 'ddqn_no_tau')
+        tau_enabled=(agent_name == 'ddqn')
     )
     if resume_training and not load_path:
         default_path = os.path.join(Config.BASE_DIR, "models", f"{agent_name}_rsu{iid}.pth")

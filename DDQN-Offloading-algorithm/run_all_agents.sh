@@ -31,7 +31,7 @@ fi
 #   • Results subdirectory:  results/<RUN_LABEL>/
 #   • TensorBoard subdirectory in configs/redis_config.json:
 #       system.log_dir = output/<RUN_LABEL>
-RUN_LABEL="${RUN_LABEL:-testlatenight_all_heuristic}"
+RUN_LABEL="${RUN_LABEL:-testnoon_all_heuristic}"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
 SIM_TIME="7200s"
@@ -334,7 +334,7 @@ _stop_drl_gracefully() {
 
 _agent_uses_tau() {
     local agent="$1"
-    [[ "$agent" != "ddqn_no_tau" ]]
+    [[ "$agent" == "ddqn" ]]
 }
 
 _start_secondary_dt() {
