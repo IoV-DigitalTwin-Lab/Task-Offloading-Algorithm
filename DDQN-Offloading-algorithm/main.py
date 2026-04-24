@@ -267,7 +267,6 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                                 'drl_decision_written_wall_s': now_wall_s,
                             },
                         )
-                        pipe.expire(f"task:{request['task_id']}:decision", 300)
                         pipe.execute()
                         print(f"[{agent_name}-{iid}] Task {request['task_id']}: "
                               f"vehicle state missing — fallback to RSU {req_rsu} "
@@ -307,8 +306,20 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                             'drl_result_timeout_s': TIMEOUT,
                         },
                     )
-                    env.r.expire(f"task:{tid}:decision", 300)
-                    print(f"[DRL-{iid}] Task {tid} timed out — discarding")
+                    # Diagnose why the result never arrived
+                    result_data    = env.r.hgetall(f"task:{tid}:result")
+                    decisions_data = env.r.hgetall(f"task:{tid}:decisions")
+                    if not result_data:
+                        _timeout_reason = "simulator never wrote result to Redis (task likely dropped or not processed by C++)"
+                    elif "status" not in result_data:
+                        _timeout_reason = f"result key exists but 'status' field missing (fields: {list(result_data.keys())})"
+                    else:
+                        _timeout_reason = f"result arrived after timeout window (status={result_data.get('status')} reason={result_data.get('reason')})"
+                    _decision_present = "decision still in Redis" if decisions_data else "decision key already expired or missing"
+                    print(
+                        f"[DRL-{iid}] Task {tid} timed out — discarding | "
+                        f"cause: {_timeout_reason} | {_decision_present}"
+                    )
                     pending.pop(tid)
                     timeout_count += 1
 
