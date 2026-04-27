@@ -15,9 +15,7 @@ from src.agents import (
     DDQNAttentionAgent,
     GreedyComputeAgent,
     GreedyDistanceAgent,
-    LeastQueueAgent,
     LocalAgent,
-    MinLatencyAgent,
     RandomAgent,
     VanillaDQNAgent,
 )
@@ -126,10 +124,6 @@ def _create_agent(agent_name, load_path=None):
         return RandomAgent()
     elif agent_name == "greedy_compute":
         return GreedyComputeAgent()
-    elif agent_name == "min_latency":
-        return MinLatencyAgent()
-    elif agent_name == "least_queue":
-        return LeastQueueAgent()
     elif agent_name == "greedy_distance":
         return GreedyDistanceAgent()
     elif agent_name == "local":
@@ -144,9 +138,7 @@ def _select_action(agent, agent_name, state, mask, env, request):
         return agent.select_action(state, mask=mask)
     elif agent_name == "random":
         return agent.select_action(mask)
-    elif agent_name == "min_latency":
-        return agent.select_action(env.candidates, env.rsus, mask, task_info=request)
-    else:  # greedy_compute, least_queue, greedy_distance
+    else:  # greedy_compute, greedy_distance, local
         return agent.select_action(env.candidates, env.rsus, mask)
 
 
@@ -710,8 +702,6 @@ def run():
             "vanilla_dqn",
             "random",
             "greedy_compute",
-            "min_latency",
-            "least_queue",
             "greedy_distance",
             "local",
         ],
@@ -735,7 +725,7 @@ def run():
             print("[ERROR] --agent is required when using --env redis")
             print(
                 "  choices: ddqn, ddqn_no_tau, ddqn_attention, vanilla_dqn, random, "
-                "greedy_compute, min_latency, least_queue, greedy_distance, local"
+                "greedy_compute, greedy_distance, local"
             )
             return
 

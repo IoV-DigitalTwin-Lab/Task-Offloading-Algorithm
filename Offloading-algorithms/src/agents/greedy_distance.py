@@ -9,7 +9,6 @@ Standard in vehicular/IoV scenarios; cited as the "Near" baseline in:
   Edge-Computing-Enabled Transportation System",
   IEEE IoTJ, 2024.
 
-Prefer MinLatencyAgent for better performance in heterogeneous networks.
 This baseline models the common real-world practice of connecting to the
 nearest available edge node.
 

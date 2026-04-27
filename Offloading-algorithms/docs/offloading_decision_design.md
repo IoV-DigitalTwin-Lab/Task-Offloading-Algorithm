@@ -111,7 +111,7 @@ else:
 Suggested starting weights: `α = 0.6` (latency matters more in IoV), `β = 0.4`.
 These can be tuned as parameters in `omnetpp.ini`.
 
-**Why this matters:** Baseline agents (`random`, `least_queue`, etc.) always try to offload regardless of feasibility. Our algorithm only offloads when it is necessary or beneficial. This keeps the RSU less congested, so when a `MUST_OFFLOAD` task arrives later the RSU has capacity — a structural advantage over baselines.
+**Why this matters:** Baseline agents (`random`, `greedy_compute`, `greedy_distance`, etc.) always try to offload regardless of feasibility. Our algorithm only offloads when it is necessary or beneficial. This keeps the RSU less congested, so when a `MUST_OFFLOAD` task arrives later the RSU has capacity - a structural advantage over baselines.
 
 ### Code location
 

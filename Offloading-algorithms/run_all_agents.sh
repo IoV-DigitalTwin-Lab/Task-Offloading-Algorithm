@@ -45,7 +45,7 @@ CAPTURE_SECONDARY_DT_LOG=${CAPTURE_SECONDARY_DT_LOG:-0}
 #
 # agent_name must be one of:
 #   ddqn | ddqn_no_tau | ddqn_attention | vanilla_dqn | random | greedy_compute |
-#   min_latency | least_queue | greedy_distance | local
+#   greedy_distance | local
 #
 # SimulationConfig must match a [Config ...] section in omnetpp.ini:
 #   Heuristic | AllOffload | AllLocal
@@ -56,8 +56,6 @@ RUNS=(
     "vanilla_dqn:Heuristic"
     "random:Heuristic"
     "greedy_compute:Heuristic"
-    "min_latency:Heuristic"
-    "least_queue:Heuristic"
     "greedy_distance:Heuristic"
     "local:AllLocal"
 )
@@ -162,7 +160,7 @@ Usage:
   ./run_all_agents.sh <agent,agent,...>
 
 Agents:
-  ddqn ddqn_no_tau ddqn_attention vanilla_dqn random greedy_compute min_latency least_queue greedy_distance local
+    ddqn ddqn_no_tau ddqn_attention vanilla_dqn random greedy_compute greedy_distance local
 
 Examples:
   ./run_all_agents.sh ddqn
