@@ -44,7 +44,7 @@ CAPTURE_SECONDARY_DT_LOG=${CAPTURE_SECONDARY_DT_LOG:-0}
 # Comment out any line to skip that run.
 #
 # agent_name must be one of:
-#   ddqn | ddqn_no_tau | vanilla_dqn | random | greedy_compute |
+#   ddqn | ddqn_no_tau | ddqn_attention | vanilla_dqn | random | greedy_compute |
 #   min_latency | least_queue | greedy_distance | local
 #
 # SimulationConfig must match a [Config ...] section in omnetpp.ini:
@@ -52,6 +52,7 @@ CAPTURE_SECONDARY_DT_LOG=${CAPTURE_SECONDARY_DT_LOG:-0}
 RUNS=(
     "ddqn:Heuristic"
     "ddqn_no_tau:Heuristic"
+    "ddqn_attention:Heuristic"
     "vanilla_dqn:Heuristic"
     "random:Heuristic"
     "greedy_compute:Heuristic"
@@ -156,7 +157,7 @@ Usage:
   ./run_all_agents.sh <agent,agent,...>
 
 Agents:
-  ddqn vanilla_dqn random greedy_compute min_latency least_queue greedy_distance local
+  ddqn ddqn_no_tau ddqn_attention vanilla_dqn random greedy_compute min_latency least_queue greedy_distance local
 
 Examples:
   ./run_all_agents.sh ddqn
@@ -390,7 +391,7 @@ _stop_drl_gracefully() {
 
 _agent_uses_tau() {
     local agent="$1"
-    [[ "$agent" == "ddqn" ]]
+    [[ "$agent" == "ddqn" || "$agent" == "ddqn_attention" ]]
 }
 
 _start_secondary_dt() {
@@ -858,7 +859,7 @@ run_one() {
     _info "Starting DRL agent  [agent=${agent}]"
     _info "  DRL log: ${drl_log}"
     local drl_extra_args=()
-    if [ "${agent}" = "ddqn" ] || [ "${agent}" = "ddqn_no_tau" ] || [ "${agent}" = "vanilla_dqn" ]; then
+    if [ "${agent}" = "ddqn" ] || [ "${agent}" = "ddqn_no_tau" ] || [ "${agent}" = "ddqn_attention" ] || [ "${agent}" = "vanilla_dqn" ]; then
         drl_extra_args+=(--resume_training)
         _info "  Continuous training enabled: existing ${agent} model checkpoints will be reused if found"
     fi
