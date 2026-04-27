@@ -22,7 +22,7 @@
 #   • Results subdirectory:  results/<RUN_LABEL>/
 #   • TensorBoard subdirectory in configs/redis_config.json:
 #       system.log_dir = output/<RUN_LABEL>
-RUN_LABEL="${RUN_LABEL:-testnight_all_heuristic}"
+RUN_LABEL="test_run"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
 SIM_TIME="7200s"
@@ -71,8 +71,9 @@ SELECTED_AGENTS=("$@")
 REDIS_DBS=()
 
 # ── compare.py settings ──────────────────────────────────────────────────────
-# Output image path (relative to the DRL project directory)
-COMPARE_OUTPUT="output/comparison_${RUN_LABEL}.png"
+# Output image path (relative to the DRL project directory).
+# Default is resolved after .env is loaded so RUN_LABEL overrides are honored.
+COMPARE_OUTPUT="${COMPARE_OUTPUT:-}"
 
 # Metrics to include in the comparison plot
 # Available: reward latency energy success_rate qos failure
@@ -115,6 +116,10 @@ REDIS_CONFIG_PATH="${DRL_DIR}/configs/redis_config.json"
 DRL_LOG_DIR="${DRL_DIR}/logs/${RUN_LABEL}"
 SIM_LOG_DIR="${SIM_DIR}/logs/${RUN_LABEL}"
 RESULTS_SUBDIR="${DRL_DIR}/results/${RUN_LABEL}"
+
+if [ -z "${COMPARE_OUTPUT}" ]; then
+    COMPARE_OUTPUT="output/comparison_${RUN_LABEL}.png"
+fi
 
 # Minimum seconds a healthy simulation is expected to run.
 # If the sim exits faster than this, it is treated as a crash and the run is

@@ -669,27 +669,6 @@ def _log_episode(
             "Decision_SV_Pct", _decision_pct(decision_types, "SERVICE_VEHICLE"), episode
         )
 
-    # Fail reasons
-    writer.add_scalar(
-        "Fail_Deadline_Rate",
-        _fail_reason_pct(all_fail_reasons, "DEADLINE_MISSED"),
-        episode,
-    )
-    writer.add_scalar(
-        "Fail_Queue_Full_Rate",
-        _fail_reason_pct(all_fail_reasons, "RSU_QUEUE_FULL"),
-        episode,
-    )
-    writer.add_scalar(
-        "Fail_SV_OOR_Rate",
-        _fail_reason_pct(all_fail_reasons, "SV_OUT_OF_RANGE"),
-        episode,
-    )
-    writer.add_scalar(
-        "Fail_Handover_Rate",
-        _fail_reason_pct(all_fail_reasons, "HANDOVER_FAIL"),
-        episode,
-    )
 
     # QoS success rates
     for q in (1, 2, 3):
@@ -704,8 +683,6 @@ def _log_episode(
     if ddqn_agent is not None:
         writer.add_scalar("Epsilon", ddqn_agent.epsilon, episode)
 
-    # Task timeout rate (cumulative)
-    writer.add_scalar("Task_Timeout_Rate", timeout_count / max(total_tasks, 1), episode)
 
 
 # ---------------------------------------------------------------------------
