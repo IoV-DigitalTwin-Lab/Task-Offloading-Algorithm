@@ -1259,6 +1259,9 @@ class IoVRedisEnv:
         })
         pipe.expire(f"task:{task_id}:decision", 300)
         pipe.expire(f"task:{task_id}:decisions", 300)
+        # Notify the Metrics Engine runner when it is active
+        if self.r.get("engine_active") in ("1", "true", "True", "yes"):
+            pipe.rpush("engine_requests:queue", task_id)
         pipe.execute()
         return {"type": decision_type, "target": target_id}
 

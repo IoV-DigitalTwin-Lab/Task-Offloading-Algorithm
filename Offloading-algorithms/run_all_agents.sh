@@ -25,7 +25,7 @@
 RUN_LABEL="test_run"
 
 # Simulation time limit (passed to run_simulation.sh as --sim-time-limit)
-SIM_TIME="7200s"
+SIM_TIME="10000s"
 
 # Seconds to wait after starting the simulation before launching the DRL agent
 # (gives the simulator time to connect to Redis and write initial state)
@@ -214,6 +214,7 @@ build_selected_runs() {
 _SIM_PID=""
 _DRL_PID=""
 _SECONDARY_PID=""
+_ENGINE_PID=""
 
 _cleanup() {
     echo ""
@@ -222,6 +223,13 @@ _cleanup() {
     [ -n "${_SECONDARY_PID}" ] && kill "${_SECONDARY_PID}" 2>/dev/null && _info "Killed secondary DT PID ${_SECONDARY_PID}"
     [ -n "${_DRL_PID}" ] && kill -SIGINT "${_DRL_PID}" 2>/dev/null && wait "${_DRL_PID}" 2>/dev/null \
         && _info "DRL PID ${_DRL_PID} stopped"
+    if [ -n "${_ENGINE_PID}" ]; then
+        kill -SIGINT "${_ENGINE_PID}" 2>/dev/null
+        wait "${_ENGINE_PID}" 2>/dev/null || true
+        redis-cli SET engine_active 0 > /dev/null 2>&1 || true
+        _info "Metrics Engine PID ${_ENGINE_PID} stopped"
+        _ENGINE_PID=""
+    fi
     exit 1
 }
 trap _cleanup SIGINT SIGTERM
@@ -795,6 +803,39 @@ PY
 #   $1 = agent name  (e.g. "ddqn")
 #   $2 = sim config  (e.g. "Heuristic")
 # Returns 1 if the simulation crashed too quickly (run skipped).
+_start_metrics_engine() {
+    local agent="$1"
+    local engine_log="${DRL_LOG_DIR}/engine_output_${agent}.log"
+    _info "Starting Metrics Engine (agent=${agent})"
+
+    # Reset per-agent task counter so training curve starts from 0 each run
+    redis-cli SET "engine:agent:${agent}:task_count" 0 > /dev/null 2>&1 || true
+
+    # Activate engine flag — C++ will now skip writeSingleResult()
+    redis-cli SET engine_active 1 > /dev/null 2>&1 || true
+
+    (
+        cd "${DRL_DIR}" || exit 1
+        exec python3 -u -m metrics_engine.runner \
+            --host "${REDIS_HOST:-127.0.0.1}" \
+            --port "${REDIS_PORT:-6379}" \
+            --db   "${REDIS_DB:-0}" \
+            > "${engine_log}" 2>&1
+    ) &
+    _ENGINE_PID=$!
+    _ok "Metrics Engine started (PID: ${_ENGINE_PID}  log: ${engine_log})"
+}
+
+_stop_metrics_engine() {
+    if [ -n "${_ENGINE_PID}" ]; then
+        kill -SIGINT "${_ENGINE_PID}" 2>/dev/null || true
+        wait "${_ENGINE_PID}" 2>/dev/null || true
+        redis-cli SET engine_active 0 > /dev/null 2>&1 || true
+        _info "Metrics Engine stopped (PID: ${_ENGINE_PID})"
+        _ENGINE_PID=""
+    fi
+}
+
 run_one() {
     local agent="$1"
     local sim_cfg="$2"
@@ -858,6 +899,9 @@ run_one() {
         return 1
     fi
 
+    # ── Start Metrics Engine ────────────────────────────────────────────────
+    _start_metrics_engine "${agent}"
+
     # ── Start DRL agent ─────────────────────────────────────────────────────
     _info "Starting DRL agent  [agent=${agent}]"
     _info "  DRL log: ${drl_log}"
@@ -897,6 +941,9 @@ run_one() {
     # Stop DRL whether sim succeeded or crashed (results may still be partial)
     _stop_drl_gracefully "${_DRL_PID}"
     _DRL_PID=""
+
+    # Stop Metrics Engine after DRL (engine may have tasks still in queue)
+    _stop_metrics_engine
 
     # ── Collect result files ────────────────────────────────────────────────
     move_new_results "${ref_file}"
@@ -960,6 +1007,7 @@ for entry in "${FILTERED_RUNS[@]}"; do
         [ -n "${_SIM_PID}" ] && kill "${_SIM_PID}" 2>/dev/null; _SIM_PID=""
         [ -n "${_SECONDARY_PID}" ] && kill "${_SECONDARY_PID}" 2>/dev/null; _SECONDARY_PID=""
         [ -n "${_DRL_PID}" ] && kill "${_DRL_PID}" 2>/dev/null; _DRL_PID=""
+        _stop_metrics_engine
     fi
 
     echo ""
