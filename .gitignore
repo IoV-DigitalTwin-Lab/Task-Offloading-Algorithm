@@ -20,3 +20,4 @@ DDQN-Offloading-algorithm/logs/*
 DDQN-Offloading-algorithm/*.log
 DDQN-Offloading-algorithm/results/*
 DDQN-Offloading-algorithm/.env
+MANUAL_TASK_IMPLEMENTATION.md

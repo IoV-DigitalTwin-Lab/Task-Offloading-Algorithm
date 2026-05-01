@@ -377,7 +377,17 @@ class IoVRedisEnv:
                         'input_size_bytes':  input_size_bytes,
                         'output_size_bytes': output_size_bytes,
                         'cpu_cycles':        cpu_cycles,
+                        'is_manual_task':    self._truthy(data.get('is_manual_task', False)),
                     }
+
+    @staticmethod
+    def _truthy(value):
+        """Parse Redis/string boolean values consistently."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def _fetch_rsu_state(self, rsu_id):
         """Fetch RSU resource state from Redis (key: rsu:{rsu_id}:resources)."""
@@ -415,6 +425,7 @@ class IoVRedisEnv:
             'acceleration':     float(data.get('acceleration', 0)),
             'pos_x':            float(data.get('pos_x', 0)),
             'pos_y':            float(data.get('pos_y', 0)),
+            'rsu_id':           data.get('rsu_id') or data.get('connected_rsu_id') or data.get('serving_rsu_id', ''),
             'sinr':             float(data.get('sinr', 0)),  # populated by simulator in future
             'distance_to_origin': 0.0,  # computed after origin is known
             # Phase 2 tau features (filled later for selected top-K candidates)
@@ -792,6 +803,7 @@ class IoVRedisEnv:
                 queue_length      = s.get('queue_length', 0),
                 pos_x             = s.get('pos_x', 0.0),
                 pos_y             = s.get('pos_y', 0.0),
+                rsu_id            = s.get('rsu_id', ''),
                 speed             = s.get('speed', 0.0),
                 heading           = s.get('heading', 0.0),
                 distance_to_origin= s.get('distance_to_origin', 9999.0),
@@ -961,6 +973,7 @@ class IoVRedisEnv:
             'output_size_bytes': output_size_bytes,
             'cpu_cycles':       cpu_cycles,
             'task_type':        data.get('task_type', 'UNKNOWN'),  # for per-type TensorBoard panels
+            'is_manual_task':   self._truthy(data.get('is_manual_task', False)),
         }
 
     def setup_from_request(self, request):
@@ -1003,6 +1016,7 @@ class IoVRedisEnv:
                 queue_length      = s.get('queue_length', 0),
                 pos_x             = s.get('pos_x', 0.0),
                 pos_y             = s.get('pos_y', 0.0),
+                rsu_id            = s.get('rsu_id', ''),
                 speed             = s.get('speed', 0.0),
                 heading           = s.get('heading', 0.0),
                 tau_up       = s.get('tau_up', 0.0),
@@ -1015,6 +1029,269 @@ class IoVRedisEnv:
         ]
         return self._build_state()
 
+    def is_manual_task(self):
+        """
+        Check if the current task request is a manual task.
+        Manual tasks are created by user clicking on the icon in the UI.
+        """
+        return self.task_request.get('is_manual_task', False)
+
+    def _closest_rsu_id_for_position(self, pos_x, pos_y):
+        """Infer the serving RSU by nearest RSU position."""
+        closest_id = None
+        closest_dist = float('inf')
+        rsus = [rsu for rsu in self.rsus if self.rsu_states.get(rsu.rsu_id)] or self.rsus
+
+        for rsu in rsus:
+            dist = math.sqrt((float(pos_x) - rsu.pos_x) ** 2 + (float(pos_y) - rsu.pos_y) ** 2)
+            if dist < closest_dist:
+                closest_id = rsu.rsu_id
+                closest_dist = dist
+
+        return closest_id
+
+    def _current_db_has_single_rsu(self):
+        """True when this Redis DB exposes one real RSU resource state."""
+        return sum(1 for rsu_id in self.rsu_ids if self.rsu_states.get(rsu_id)) <= 1
+
+    def _candidate_in_active_rsu(self, candidate):
+        """Return True when a candidate belongs to the task's active RSU/DT."""
+        active_rsu_id = getattr(self.active_rsu, 'rsu_id', self.task_request.get('rsu_id', ''))
+        candidate_rsu_id = getattr(candidate, 'rsu_id', '')
+
+        if candidate_rsu_id:
+            return str(candidate_rsu_id) == str(active_rsu_id)
+
+        if self._current_db_has_single_rsu():
+            return True
+
+        inferred_rsu_id = self._closest_rsu_id_for_position(candidate.pos_x, candidate.pos_y)
+        return str(inferred_rsu_id) == str(active_rsu_id)
+
+    def _vehicle_in_active_rsu_coverage(self, vehicle_state):
+        """Return True when a raw vehicle state is inside the active RSU/DT."""
+        if not self.active_rsu:
+            return False
+
+        vehicle_rsu_id = vehicle_state.get('rsu_id', '')
+        if vehicle_rsu_id:
+            return str(vehicle_rsu_id) == str(self.active_rsu.rsu_id)
+
+        if self._current_db_has_single_rsu():
+            return True
+
+        inferred_rsu_id = self._closest_rsu_id_for_position(
+            vehicle_state.get('pos_x', 0.0),
+            vehicle_state.get('pos_y', 0.0),
+        )
+        if str(inferred_rsu_id) != str(self.active_rsu.rsu_id):
+            return False
+
+        dist_to_active_rsu = math.sqrt(
+            (float(vehicle_state.get('pos_x', 0.0)) - self.active_rsu.pos_x) ** 2
+            + (float(vehicle_state.get('pos_y', 0.0)) - self.active_rsu.pos_y) ** 2
+        )
+        return dist_to_active_rsu <= Config.RSU_RANGE
+
+    def _fetch_manual_sv_candidates(self):
+        """
+        Manual bypass uses the active RSU/DB pool, not the DDQN V2V-nearby
+        top-K pool. This allows selecting other service vehicles in the same DT
+        while still weighting nearer vehicles higher.
+        """
+        origin_id = self.task_request.get('vehicle_id', '')
+        origin_state = self._fetch_vehicle_state(origin_id)
+        if origin_state is None:
+            return []
+
+        mem_req_mb = float(self.task_request.get('mem_footprint_mb', 0))
+        candidates = []
+        stale_ids = []
+
+        for vehicle_id, _ in self.r.zrevrange('service_vehicles:available', 0, -1, withscores=True):
+            if str(vehicle_id) == str(origin_id):
+                continue
+
+            state = self._fetch_vehicle_state(vehicle_id)
+            if state is None:
+                stale_ids.append(vehicle_id)
+                continue
+
+            if (
+                float(state.get('cpu_available', 0.0)) <= 0
+                or float(state.get('mem_available', 0.0)) < mem_req_mb
+                or not self._vehicle_in_active_rsu_coverage(state)
+            ):
+                continue
+
+            dist = math.sqrt(
+                (state['pos_x'] - origin_state['pos_x']) ** 2
+                + (state['pos_y'] - origin_state['pos_y']) ** 2
+            )
+            candidates.append(types.SimpleNamespace(
+                vehicle_id=state['vehicle_id'],
+                cpu_avail=state.get('cpu_available', 0.0),
+                mem_avail=state.get('mem_available', 0.0),
+                queue_length=state.get('queue_length', 0),
+                pos_x=state.get('pos_x', 0.0),
+                pos_y=state.get('pos_y', 0.0),
+                rsu_id=state.get('rsu_id', ''),
+                distance_to_origin=dist,
+            ))
+
+        if stale_ids:
+            pipe = self.r.pipeline(transaction=False)
+            for sid in stale_ids:
+                pipe.zrem('service_vehicles:available', sid)
+            pipe.execute()
+
+        return candidates
+
+    @staticmethod
+    def _weighted_choice(items, weights):
+        """Pick one item using non-negative weights."""
+        total = sum(weights)
+        if total <= 0:
+            return random.choice(items)
+
+        threshold = random.uniform(0.0, total)
+        upto = 0.0
+        for item, weight in zip(items, weights):
+            upto += weight
+            if upto >= threshold:
+                return item
+        return items[-1]
+
+    def _select_weighted_manual_sv(self, valid_svs):
+        """
+        Use mostly uniform same-DB SV selection with a light distance bias.
+        Manual tasks should look realistic, not like a nearest-vehicle heuristic.
+        """
+        ranked_svs = sorted(valid_svs, key=lambda c: getattr(c, 'distance_to_origin', 9999.0))
+
+        if len(ranked_svs) > 1 and random.random() < 0.75:
+            return random.choice(ranked_svs)
+
+        weights = [1.0 / ((rank + 1) ** 0.35) for rank, _ in enumerate(ranked_svs)]
+        return self._weighted_choice(ranked_svs, weights)
+
+    def select_best_candidate_for_manual_task(self):
+        """
+        For manual tasks, randomly select a target inside the same active RSU/DT,
+        bypassing the DRL/DDQN action.
+        
+        Service vehicles get priority over the RSU, and nearer service vehicles
+        get priority over farther ones. The selection remains stochastic so the
+        nearest service vehicle is not always selected.
+        
+        Returns: (decision_type, target_id) or None if no suitable target found
+        """
+        valid_svs = self._fetch_manual_sv_candidates()
+
+        valid_rsus = []
+        if self.active_rsu and float(self.rsu_states.get(self.active_rsu.rsu_id, {}).get('cpu_available', 0)) > 0:
+            valid_rsus.append(self.active_rsu)
+
+        target_classes = []
+        if valid_svs:
+            target_classes.append(("SERVICE_VEHICLE", 0.9))
+        if valid_rsus:
+            target_classes.append(("RSU", 0.1 if valid_svs else 1.0))
+
+        if target_classes:
+            chosen_class = self._weighted_choice(
+                [target_class for target_class, _ in target_classes],
+                [weight for _, weight in target_classes],
+            )
+            if chosen_class == "SERVICE_VEHICLE":
+                return "SERVICE_VEHICLE", self._select_weighted_manual_sv(valid_svs).vehicle_id
+            return "RSU", self.active_rsu.rsu_id
+
+        return None
+
+    @staticmethod
+    def _lifecycle_target_entity(decision_type, target_id):
+        """
+        Keep simulator decisions unchanged, but make dashboard lifecycle labels
+        visually distinguish service vehicles from RSUs.
+        """
+        target = str(target_id)
+        if decision_type == "SERVICE_VEHICLE" and not target.startswith("SV_"):
+            return f"SV_{target}"
+        return target
+
+    def handle_manual_task(self, task_id):
+        """
+        Handle a manual task without running DRL model inference.
+        
+        For manual tasks:
+        - Randomly select a nearby service vehicle or an available RSU
+        - Skip DRL model inference
+        - Write decision to Redis
+        - Log the decision
+        
+        Returns: (decision_type, target_id) or None if failed
+        """
+        if not self.is_manual_task():
+            return None
+        
+        decision = self.select_best_candidate_for_manual_task()
+        
+        if decision:
+            decision_type, target_id = decision
+
+            # Acquire manual lock so no other agent overwrites this decision
+            # and persist the manual decision atomically.
+            pipe = self.r.pipeline()
+            pipe.hset(f"task:{task_id}:decision", mapping={
+                "agent": "manual_selection",
+                "type": decision_type,
+                "target": target_id,
+                "is_manual": "true",
+            })
+            pipe.hset(f"task:{task_id}:decisions", mapping={
+                "agents": "manual_selection",
+                "manual_selection_type": decision_type,
+                "manual_selection_target": target_id,
+                "is_manual": "true",
+            })
+            # set a manual lock key so other writer functions detect manual handling
+            pipe.set(f"task:{task_id}:manual_lock", "1")
+            pipe.expire(f"task:{task_id}:manual_lock", 300)
+            pipe.expire(f"task:{task_id}:decision", 300)
+            pipe.expire(f"task:{task_id}:decisions", 300)
+            pipe.execute()
+
+            # Publish lifecycle event for dashboard consumers
+            try:
+                lifecycle_target = self._lifecycle_target_entity(decision_type, target_id)
+                evt = {
+                    "task_id": str(task_id),
+                    "event_type": "DECISION_OFFLOAD",
+                    "event_time": float(time.time()),
+                    "source_entity": str(self.task_request.get('vehicle_id', '')),
+                    "target_entity": lifecycle_target,
+                    "details": json.dumps({
+                        "manual": True,
+                        "decision_type": decision_type,
+                        "target_id": str(target_id),
+                    }),
+                }
+                # Use XADD to append to stream
+                self.r.xadd("task_lifecycle_events", evt, maxlen=1000)
+            except Exception:
+                # Non-fatal; proceed even if stream publish fails
+                pass
+
+            # Log the manual task decision
+            print(f"[Redis-ENV] Manual Task {task_id}: {decision_type} → {target_id} "
+                  f"(available_svs={len(self.candidates)}, available_rsus={len(self.rsus)})")
+
+            return decision_type, target_id
+        else:
+            print(f"[Redis-WARN] Manual Task {task_id}: No suitable target found, fallback to RSU")
+            return None
+
     def write_decisions(self, task_id, actions, trace_metadata=None):
         """
         Write all agent decisions to Redis atomically and return agent_decisions mapping.
@@ -1026,6 +1303,15 @@ class IoVRedisEnv:
             raise ValueError(
                 f"Task mismatch while writing decisions: request={current_task_id}, write={task_id}"
             )
+
+        # If a manual lock exists for this task, do not overwrite the manual decision.
+        if self.r.get(f"task:{task_id}:manual_lock"):
+            # Read manual decision and return it for all agents to consume.
+            stored = self.r.hgetall(f"task:{task_id}:decision")
+            mtype = stored.get('type') or stored.get('decision_type') or 'RSU'
+            mtarget = stored.get('target') or stored.get('target_entity') or stored.get('processor_id') or ''
+            agent_decisions = {agent: (mtype, mtarget) for agent in actions.keys()}
+            return agent_decisions
 
         candidate_ids = {str(c.vehicle_id) for c in self.candidates}
 
@@ -1244,6 +1530,14 @@ class IoVRedisEnv:
         Write a single-agent decision to task:{task_id}:decision.
         Returns (decision_type, target_id) as a dict.
         """
+        # If this task has been manually locked, return the manual decision
+        # instead of overwriting it.
+        if self.r.get(f"task:{task_id}:manual_lock"):
+            stored = self.r.hgetall(f"task:{task_id}:decision")
+            mtype = stored.get('type') or stored.get('decision_type') or 'RSU'
+            mtarget = stored.get('target') or stored.get('target_entity') or stored.get('processor_id') or ''
+            return {"type": mtype, "target": mtarget}
+
         decision_type, target_id = self._action_to_target(action)
         pipe = self.r.pipeline()
         pipe.hset(f"task:{task_id}:decision", mapping={

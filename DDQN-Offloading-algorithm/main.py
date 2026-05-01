@@ -273,6 +273,47 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                               f"(action {fallback_action})")
                         continue
 
+                    # ── Check for manual task (skip DRL inference) ─────────────
+                    if env.is_manual_task():
+                        decision = env.handle_manual_task(request['task_id'])
+                        if decision:
+                            decision_type, target_id = decision
+                            task_type = getattr(env, 'task_type', 'UNKNOWN')
+                            decision_written_wall_s = time.time()
+                            
+                            # Log manual task to Redis
+                            pipe = env.r.pipeline()
+                            pipe.hset(
+                                f"task:{request['task_id']}:decision",
+                                mapping={
+                                    'agent': 'manual_selection',
+                                    'drl_instance_id': iid,
+                                    'rsu_id': rsu_id,
+                                    'drl_dequeued_wall_s': dequeued_wall_s,
+                                    'drl_state_ready_wall_s': decision_written_wall_s,
+                                    'drl_decision_written_wall_s': decision_written_wall_s,
+                                    'is_manual_task': 'true',
+                                },
+                            )
+                            pipe.execute()
+                            
+                            # Add to pending without DRL action
+                            pending[request['task_id']] = {
+                                'state':         state,
+                                'action':        None,  # No DRL action for manual tasks
+                                'decision_type': decision_type,
+                                'target':        target_id,
+                                'task_request':  request,
+                                'task_type':     task_type,
+                                'is_manual':     True,
+                                'timestamp':     time.time(),
+                            }
+                            continue
+                        else:
+                            print(f"[{agent_name}-{iid}] Task {request['task_id']}: Manual task handling failed, skipping")
+                            continue
+
+                    # ── Normal DRL inference path ────────────────────────────
                     mask   = env.get_action_mask()
                     action = _select_action(agent, agent_name, state, mask, env, request)
                     dec    = env.write_decision(request['task_id'], action, agent_name)
@@ -292,6 +333,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                         'target':        dec['target'],
                         'task_request':  request,
                         'task_type':     task_type,
+                        'is_manual':     False,
                         'timestamp':     time.time(),
                     }
 
@@ -333,6 +375,7 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                 reason  = result.get('reason', 'NONE')
                 ttype   = entry['task_type']
                 qos     = float(entry['task_request'].get('qos', 1.0))
+                is_manual = entry.get('is_manual', False)
 
                 lat_by_type[ttype].append(latency)
                 ene_by_type[ttype].append(energy)
@@ -350,7 +393,8 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                 episode       += 1
                 completions_since_train += 1
 
-                if ddqn_agent is not None:
+                # ── Only store transition for DRL training if NOT a manual task ─
+                if ddqn_agent is not None and not is_manual:
                     reward, _ = env.compute_reward_for(
                         entry['task_request'], result, entry['decision_type'], entry['target']
                     )
@@ -358,6 +402,17 @@ def _run_single_agent_instance(instance_cfg, agent_name, offload_mode, stop_even
                     ddqn_agent.store_transition(
                         entry['state'], entry['action'], reward, entry['state'], done=True
                     )
+                elif is_manual:
+                    # Log manual task result without storing in DRL memory
+                    print(f"[{agent_name}-{iid}] Manual Task {task_id}: {entry['decision_type']} → {entry['target']} | "
+                          f"Status={success} Latency={latency:.3f}s Energy={energy:.3f}")
+                    # Optional: Log to Redis for analysis
+                    env.r.hset(f"task:{task_id}:decision", mapping={
+                        'manual_task_completed': 'true',
+                        'manual_success': '1' if success else '0',
+                        'manual_latency': str(latency),
+                        'manual_energy': str(energy),
+                    })
 
                 # TensorBoard (offloaded tasks drive the episode counter)
                 _log_episode(writer, episode, success, latency, energy, reason,
