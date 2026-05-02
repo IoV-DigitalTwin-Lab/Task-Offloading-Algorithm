@@ -34,10 +34,10 @@ DRL_START_DELAY=4
 # Capture simulator stdout/stderr into per-run log files only when explicitly
 # enabled. The heuristic DDQN simulation is very chatty and can otherwise
 # generate multi-giabyte logs.
-CAPTURE_SIM_LOG=${CAPTURE_SIM_LOG:-0}
+CAPTURE_SIM_LOG=${CAPTURE_SIM_LOG:-1}
 
-# Capture secondary DT stdout/stderr only when explicitly enabled.
-CAPTURE_SECONDARY_DT_LOG=${CAPTURE_SECONDARY_DT_LOG:-0}
+# Capture secondary DT stdout/stderr by default to preserve SINR/prediction diagnostics.
+CAPTURE_SECONDARY_DT_LOG=${CAPTURE_SECONDARY_DT_LOG:-1}
 
 # ── Agents to run ────────────────────────────────────────────────────────────
 # Format: "agent_name:SimulationConfig"
