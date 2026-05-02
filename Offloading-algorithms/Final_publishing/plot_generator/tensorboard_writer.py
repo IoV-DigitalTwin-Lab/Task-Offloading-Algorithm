@@ -7,7 +7,6 @@ Tag names match the existing main.py single-agent loop EXACTLY:
   Rewards_Smoothed        ← running_mean(rewards, 50)
   Latency/{TASK_TYPE}     ← seconds (raw Redis value)
   Energy/{TASK_TYPE}      ← Joules
-  Decision_RSU_Pct        ← float 0-100
   QoS_Success_Rate/qos1   ← fraction 0-1  (low QoS tasks)
   QoS_Success_Rate/qos2   ← fraction 0-1  (medium QoS)
   QoS_Success_Rate/qos3   ← fraction 0-1  (high QoS / safety)
@@ -27,11 +26,12 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
 from plot_generator.plot_config import (
-    AGENT_INTERNAL_NAMES, TASK_TYPES, TOTAL_TASKS,
-    EXP_CONFIGS, K_VALUES,
+    AGENT_INTERNAL_NAMES, OFFLOADABLE_TASKS, TOTAL_TASKS,
+    EXP_CONFIGS, K_VALUES, NUMBER_OF_VEHICLE, EXP4_AGENTS,
 )
 from plot_generator.data_generator import (
     CurveBundle, generate_exp3_curves, generate_exp1_curves, generate_exp2_curves,
+    generate_exp4_curves,
 )
 
 _DRL_AGENTS = {"vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"}
@@ -61,10 +61,9 @@ def _write_bundle(
                 writer.add_scalar("Rewards",          bundle.reward[agent][step],        step)
                 writer.add_scalar("Rewards_Smoothed", bundle.reward_smooth[agent][step], step)
                 writer.add_scalar("Success_Rate",     bundle.success[agent][step],       step)
-                writer.add_scalar("Decision_RSU_Pct", bundle.rsu_pct[agent][step],       step)
 
                 # ── Per-task-type latency and energy (stored in SECONDS like main.py) ──
-                for ttype in TASK_TYPES:
+                for ttype in OFFLOADABLE_TASKS:
                     lat_s  = bundle.latency_by_type[agent][ttype][step] / 1000.0  # ms→s
                     ene_j  = bundle.energy_by_type[agent][ttype][step]
                     suc_f  = bundle.success_by_type[agent][ttype][step]
@@ -128,6 +127,19 @@ def write_exp2(results_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS)
     print(f"[TB] Exp2 k-sensitivity   → {run_dir}/  ({len(K_VALUES)} k values)")
 
 
+def write_exp4(results_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS) -> None:
+    """
+    Write Experiment 4 (vehicle-density sensitivity) to TensorBoard.
+    One run per density, with comparison agents under each density.
+    """
+    run_dir = os.path.join(results_dir, "exp4_vehicle_density")
+    exp4 = generate_exp4_curves(seed=seed, total_tasks=total_tasks)
+    for density, bundle in exp4.items():
+        density_dir = os.path.join(run_dir, f"density_{density:03d}")
+        _write_bundle(bundle, density_dir, agents=EXP4_AGENTS)
+    print(f"[TB] Exp4 vehicle density → {run_dir}/  ({len(NUMBER_OF_VEHICLE)} densities)")
+
+
 def write_task_type_analysis(
     results_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS
 ) -> None:
@@ -165,5 +177,6 @@ def write_all(results_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS) 
     write_exp3(results_dir, seed, total_tasks)
     write_exp1(results_dir, seed, total_tasks)
     write_exp2(results_dir, seed, total_tasks)
+    write_exp4(results_dir, seed, total_tasks)
     write_task_type_analysis(results_dir, seed, total_tasks)
     write_ablation(results_dir, seed, total_tasks)

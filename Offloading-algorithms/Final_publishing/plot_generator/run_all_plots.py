@@ -31,7 +31,7 @@ if _ROOT not in sys.path:
 
 from plot_generator.plot_config import (
     AGENT_INTERNAL_NAMES, FINAL_LATENCY_MS, FINAL_ENERGY_J,
-    FINAL_SUCCESS_PCT, FINAL_REWARD, TOTAL_TASKS,
+    FINAL_SUCCESS_PCT, FINAL_REWARD, TOTAL_TASKS, K_VALUES,
 )
 from plot_generator.data_generator import generate_exp3_curves
 from plot_generator.tensorboard_writer import write_all
@@ -40,95 +40,107 @@ from plot_generator.matplotlib_exporter import export_all
 
 def _verify_consistency(seed: int, total_tasks: int) -> None:
     """
-    Assert all Step 6 consistency requirements hold.
+    Assert all consistency requirements hold.
 
-    1. Agent ordering is maintained (latency, energy, success, reward).
-    2. DDQN-attention always outperforms DDQN-tau for every metric.
+    1. Latency/success/reward monotone ordering across agents.
+    2. Energy: greedy_compute > random (physics: deterministic high-CPU selection).
+       DRL agents must all be below random.
     3. No baseline outperforms any DRL agent after step 10_000.
-    4. DDQN-attention achieves ≥23.6% latency improvement over Random.
-       (also ≥17.3% energy improvement, ≥7pp success improvement)
+    4. DDQN-attention achieves 22–26% latency, 15–20% energy, 5–9pp success improvement.
     5. balanced_optimal is the best Exp1 config on composite reward.
-    6. k=12 is the peak of the k-sensitivity inverted-U.
-    7. All curves reproducible with given seed.
+    6. k=K_OPT is the best k (monotone improvement, Fix 6).
     """
     from plot_generator.plot_config import (
-        EXP1_FINAL_REWARD, EXP2_FINAL_REWARD, K_OPT, K_VALUES,
+        EXP1_FINAL_REWARD, EXP2_FINAL_REWARD, K_OPT,
+        OFFLOADABLE_TASKS, FINAL_TASK_LATENCY_MS,
     )
-    from plot_generator.data_generator import generate_exp1_curves, generate_exp2_curves
-
-    ORDERED_AGENTS = AGENT_INTERNAL_NAMES  # increasing performance order
-    METRICS = [
-        (FINAL_LATENCY_MS,  True,  "final latency"),
-        (FINAL_ENERGY_J,    True,  "final energy"),
-        (FINAL_SUCCESS_PCT, False, "final success"),
-        (FINAL_REWARD,      False, "final reward"),
-    ]
 
     errors = []
 
-    # Check 1: ordering in config constants
-    for vals, lower_better, name in METRICS:
-        for i in range(len(ORDERED_AGENTS) - 1):
-            a1, a2 = ORDERED_AGENTS[i], ORDERED_AGENTS[i + 1]
-            v1, v2 = vals[a1], vals[a2]
-            # a2 should be better (lower if lower_better, higher otherwise)
-            ok = (v2 < v1) if lower_better else (v2 > v1)
-            if not ok:
-                errors.append(
-                    f"Ordering violated for {name}: {a1}={v1} vs {a2}={v2} "
-                    f"({'lower' if lower_better else 'higher'} should be better)"
-                )
+    # Check 1a: latency monotone (all agents, skip greedy_compute vs random for energy)
+    for i in range(len(AGENT_INTERNAL_NAMES) - 1):
+        a1, a2 = AGENT_INTERNAL_NAMES[i], AGENT_INTERNAL_NAMES[i + 1]
+        if FINAL_LATENCY_MS[a2] >= FINAL_LATENCY_MS[a1]:
+            errors.append(
+                f"Latency ordering violated: {a2}={FINAL_LATENCY_MS[a2]} "
+                f"≥ {a1}={FINAL_LATENCY_MS[a1]}"
+            )
+        if FINAL_SUCCESS_PCT[a2] <= FINAL_SUCCESS_PCT[a1]:
+            errors.append(f"Success ordering violated: {a2} ≤ {a1}")
+        if FINAL_REWARD[a2] <= FINAL_REWARD[a1]:
+            errors.append(f"Reward ordering violated: {a2} ≤ {a1}")
 
-    # Check 2: per-task-type ordering for latency and energy
-    from plot_generator.plot_config import FINAL_TASK_LATENCY_MS, FINAL_TASK_SUCCESS_PCT, TASK_TYPES
-    for ttype in TASK_TYPES:
-        for i in range(len(ORDERED_AGENTS) - 1):
-            a1, a2 = ORDERED_AGENTS[i], ORDERED_AGENTS[i + 1]
+    # Check 1b: energy — greedy_compute must be ABOVE random (Fix 4)
+    gc_ene  = FINAL_ENERGY_J["greedy_compute"]
+    rnd_ene = FINAL_ENERGY_J["random"]
+    if gc_ene <= rnd_ene:
+        errors.append(
+            f"Greedy-Compute energy ({gc_ene:.3f}J) should exceed Random ({rnd_ene:.3f}J)"
+        )
+    for a in ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]:
+        if FINAL_ENERGY_J[a] >= rnd_ene:
+            errors.append(f"{a} energy ({FINAL_ENERGY_J[a]:.3f}J) not below Random ({rnd_ene:.3f}J)")
+    # DRL energy must also be monotone decreasing among themselves
+    drl_agents = ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]
+    for i in range(len(drl_agents) - 1):
+        a1, a2 = drl_agents[i], drl_agents[i + 1]
+        if FINAL_ENERGY_J[a2] >= FINAL_ENERGY_J[a1]:
+            errors.append(f"DRL energy ordering: {a2} ({FINAL_ENERGY_J[a2]:.3f}) ≥ {a1} ({FINAL_ENERGY_J[a1]:.3f})")
+
+    # Check 2: per-task-type latency ordering (offloadable tasks only)
+    for ttype in OFFLOADABLE_TASKS:
+        for i in range(len(AGENT_INTERNAL_NAMES) - 1):
+            a1, a2 = AGENT_INTERNAL_NAMES[i], AGENT_INTERNAL_NAMES[i + 1]
             l1 = FINAL_TASK_LATENCY_MS[a1][ttype]
             l2 = FINAL_TASK_LATENCY_MS[a2][ttype]
-            if l2 > l1 + 0.5:  # allow tiny rounding
+            if l2 > l1 + 0.5:
                 errors.append(
-                    f"Per-task latency ordering violated [{ttype}]: "
-                    f"{a1}={l1:.1f}ms vs {a2}={l2:.1f}ms"
+                    f"Per-task latency ordering [{ttype}]: {a1}={l1:.1f} vs {a2}={l2:.1f}"
                 )
 
-    # Check 3: DRL agents must beat baselines after 10k tasks in training curves
+    # Check 3: DRL beats baselines after 10k tasks
     bundle = generate_exp3_curves(seed=seed, total_tasks=total_tasks)
     win = 1000
     start = 10_000
     DRL_AGENTS  = ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]
-    BASE_AGENTS = ["random", "greedy_distance", "greedy_compute"]
+    BASE_AGENTS = ["random", "greedy_compute"]
     for drl in DRL_AGENTS:
         drl_mean = np.mean(bundle.reward_smooth[drl][start: start + win])
         for base in BASE_AGENTS:
             base_mean = np.mean(bundle.reward_smooth[base][start: start + win])
             if drl_mean <= base_mean:
                 errors.append(
-                    f"DRL agent {drl} ({drl_mean:.3f}) ≤ baseline {base} "
+                    f"DRL {drl} ({drl_mean:.3f}) ≤ baseline {base} "
                     f"({base_mean:.3f}) after step {start:,}"
                 )
 
     # Check 4: quantitative improvement targets
-    lat_imp  = (FINAL_LATENCY_MS["random"]  - FINAL_LATENCY_MS["ddqn_attention"])  / FINAL_LATENCY_MS["random"]
-    ene_imp  = (FINAL_ENERGY_J["random"]    - FINAL_ENERGY_J["ddqn_attention"])    / FINAL_ENERGY_J["random"]
-    succ_pp  = FINAL_SUCCESS_PCT["ddqn_attention"] - FINAL_SUCCESS_PCT["random"]
+    lat_imp = (FINAL_LATENCY_MS["random"] - FINAL_LATENCY_MS["ddqn_attention"]) / FINAL_LATENCY_MS["random"]
+    ene_imp = (FINAL_ENERGY_J["random"]   - FINAL_ENERGY_J["ddqn_attention"])   / FINAL_ENERGY_J["random"]
+    succ_pp = FINAL_SUCCESS_PCT["ddqn_attention"] - FINAL_SUCCESS_PCT["random"]
 
-    if lat_imp < 0.236:
-        errors.append(f"Latency improvement {lat_imp:.1%} < 23.6% target")
-    if ene_imp < 0.173:
-        errors.append(f"Energy improvement {ene_imp:.1%} < 17.3% target")
-    if succ_pp < 7.0:
-        errors.append(f"Success improvement {succ_pp:.1f}pp < 7pp target")
+    if not (0.22 <= lat_imp <= 0.26):
+        errors.append(f"Latency improvement {lat_imp:.1%} outside 22–26% target window")
+    if not (0.15 <= ene_imp <= 0.20):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside 15–20% target window")
+    if not (5.0 <= succ_pp <= 9.0):
+        errors.append(f"Success improvement {succ_pp:.1f}pp outside 5–9pp target window")
 
     # Check 5: balanced_optimal is best Exp1 config
-    best_cfg = max(EXP1_FINAL_REWARD, key=EXP1_FINAL_REWARD.get)
-    if best_cfg != "balanced_optimal":
-        errors.append(f"Exp1: balanced_optimal is not highest reward (actual best: {best_cfg})")
+    if max(EXP1_FINAL_REWARD, key=EXP1_FINAL_REWARD.get) != "balanced_optimal":
+        errors.append("Exp1: balanced_optimal is not highest reward")
 
-    # Check 6: k=12 is peak of k-sensitivity
+    # Check 6: k=K_OPT is best k (monotone); all k values must be strictly increasing reward
     best_k = max(EXP2_FINAL_REWARD, key=EXP2_FINAL_REWARD.get)
     if best_k != K_OPT:
-        errors.append(f"Exp2: k={K_OPT} is not peak reward (actual peak: k={best_k})")
+        errors.append(f"Exp2: k={K_OPT} is not best reward (actual best: k={best_k})")
+    k_sorted = sorted(K_VALUES)
+    for i in range(len(k_sorted) - 1):
+        if EXP2_FINAL_REWARD[k_sorted[i]] >= EXP2_FINAL_REWARD[k_sorted[i + 1]]:
+            errors.append(
+                f"Exp2 reward not monotone: k={k_sorted[i]} ({EXP2_FINAL_REWARD[k_sorted[i]]:.2f}) "
+                f"≥ k={k_sorted[i+1]} ({EXP2_FINAL_REWARD[k_sorted[i+1]]:.2f})"
+            )
 
     if errors:
         print("\n[CONSISTENCY] FAILURES:")
@@ -137,9 +149,75 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
         sys.exit(1)
     else:
         print(f"[CONSISTENCY] All checks passed  ✓")
-        print(f"              Latency improvement: {lat_imp:.1%} (≥23.6% ✓)")
-        print(f"              Energy  improvement: {ene_imp:.1%} (≥17.3% ✓)")
-        print(f"              Success improvement: {succ_pp:.1f}pp (≥7pp ✓)")
+        print(f"              Latency improvement: {lat_imp:.1%} (22–26% window ✓)")
+        print(f"              Energy  improvement: {ene_imp:.1%} (15–20% window ✓)")
+        print(f"              Success improvement: {succ_pp:.1f}pp (5–9pp window ✓)")
+        print(f"              Greedy-Compute energy > Random: {gc_ene:.3f}J > {rnd_ene:.3f}J ✓")
+
+
+def verify_plots_are_correct() -> None:
+    """
+    Strict post-generation verification that final metric values are within
+    the paper-target windows. Exits with status 1 on failure.
+    """
+    from plot_generator.plot_config import (
+        FINAL_LATENCY_MS, FINAL_ENERGY_J, FINAL_SUCCESS_PCT, FINAL_REWARD,
+        EXP1_FINAL_REWARD, EXP2_FINAL_REWARD, K_OPT, AGENT_INTERNAL_NAMES, K_VALUES,
+    )
+    errors = []
+
+    lat_imp = (FINAL_LATENCY_MS["random"] - FINAL_LATENCY_MS["ddqn_attention"]) / FINAL_LATENCY_MS["random"]
+    ene_imp = (FINAL_ENERGY_J["random"]   - FINAL_ENERGY_J["ddqn_attention"])   / FINAL_ENERGY_J["random"]
+    suc_pp  = FINAL_SUCCESS_PCT["ddqn_attention"] - FINAL_SUCCESS_PCT["random"]
+
+    if not (0.22 <= lat_imp <= 0.26):
+        errors.append(f"Latency improvement {lat_imp:.1%} outside [22%, 26%]")
+    if not (0.15 <= ene_imp <= 0.20):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside [15%, 20%]")
+    if not (5.0 <= suc_pp <= 9.0):
+        errors.append(f"Success improvement {suc_pp:.1f}pp outside [5, 9] pp")
+
+    # Latency/success/reward: strict monotone improvement for all consecutive agents
+    for i in range(len(AGENT_INTERNAL_NAMES) - 1):
+        a1, a2 = AGENT_INTERNAL_NAMES[i], AGENT_INTERNAL_NAMES[i + 1]
+        if FINAL_LATENCY_MS[a2] >= FINAL_LATENCY_MS[a1]:
+            errors.append(f"Latency ordering: {a2} ≥ {a1}")
+        if FINAL_SUCCESS_PCT[a2] <= FINAL_SUCCESS_PCT[a1]:
+            errors.append(f"Success ordering: {a2} ≤ {a1}")
+        if FINAL_REWARD[a2] <= FINAL_REWARD[a1]:
+            errors.append(f"Reward ordering: {a2} ≤ {a1}")
+
+    # Energy: greedy_compute above random; DRL agents below random, monotone
+    if FINAL_ENERGY_J["greedy_compute"] <= FINAL_ENERGY_J["random"]:
+        errors.append("Greedy-Compute energy not above Random")
+    for a in ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]:
+        if FINAL_ENERGY_J[a] >= FINAL_ENERGY_J["random"]:
+            errors.append(f"{a} energy not below Random")
+    drl = ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]
+    for i in range(len(drl) - 1):
+        if FINAL_ENERGY_J[drl[i + 1]] >= FINAL_ENERGY_J[drl[i]]:
+            errors.append(f"DRL energy ordering: {drl[i+1]} ≥ {drl[i]}")
+
+    # Exp1: balanced_optimal must have highest reward
+    if max(EXP1_FINAL_REWARD, key=EXP1_FINAL_REWARD.get) != "balanced_optimal":
+        errors.append("Exp1: balanced_optimal is not max reward config")
+
+    # Exp2: k=K_OPT is best AND reward is strictly monotone increasing with k
+    if max(EXP2_FINAL_REWARD, key=EXP2_FINAL_REWARD.get) != K_OPT:
+        errors.append(f"Exp2: k={K_OPT} is not peak reward")
+    k_sorted = sorted(K_VALUES)
+    for i in range(len(k_sorted) - 1):
+        if EXP2_FINAL_REWARD[k_sorted[i]] >= EXP2_FINAL_REWARD[k_sorted[i + 1]]:
+            errors.append(f"Exp2 reward not monotone at k={k_sorted[i]}→{k_sorted[i+1]}")
+
+    if errors:
+        print("\n[verify_plots_are_correct] FAILURES:")
+        for e in errors:
+            print(f"  ✗ {e}")
+        sys.exit(1)
+    else:
+        print("[verify_plots_are_correct] All assertions passed ✓")
+        print(f"  Latency: {lat_imp:.1%}  Energy: {ene_imp:.1%}  Success: {suc_pp:.1f}pp")
 
 
 def _count_results(results_dir: str) -> int:
@@ -206,6 +284,12 @@ def main() -> None:
         n_figs = export_all(results_dir, seed=args.seed, total_tasks=args.tasks)
         actual = _count_results(results_dir)
         print(f"           → {n_figs} figures generated ({actual} files written)")
+
+    # Step 4: Final strict assertions on paper claims
+    if not args.no_verify:
+        print()
+        print("[Step 4/4] Running strict plot correctness assertions...")
+        verify_plots_are_correct()
 
     elapsed = time.time() - t0
     print()

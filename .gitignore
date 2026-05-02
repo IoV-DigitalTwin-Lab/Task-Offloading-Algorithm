@@ -21,3 +21,4 @@ Offloading-algorithms/*.log
 Offloading-algorithms/results/*
 Offloading-algorithms/.env
 Offloading-algorithms/Final_publishing/results/*
+Offloading-algorithms/Final_publishing/result*
