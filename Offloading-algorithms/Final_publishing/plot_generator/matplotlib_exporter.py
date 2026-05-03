@@ -27,6 +27,8 @@ from plot_generator.plot_config import (
     IEEE_STYLE, AGENT_INTERNAL_NAMES, AGENT_DISPLAY_NAMES, AGENT_COLORS,
     AGENT_MARKERS, AGENT_LINESTYLES, AGENT_MARKEVERY,
     TASK_TYPES, OFFLOADABLE_TASKS, TASK_DISPLAY_NAMES, TASK_SHORT, TASK_COLORS,
+    TASK_SIZE_KB, TASK_SIZE_PLOT_ENERGY_J, TASK_SIZE_PLOT_LATENCY_S,
+    TASK_SIZE_PLOT_SUCCESS,
     EXP_CONFIGS, CONFIG_COLORS, CONFIG_DISPLAY,
     K_VALUES, K_COLORS, K_OPT, K_INFERENCE_TIME_MS,
     FINAL_LATENCY_MS, FINAL_ENERGY_J, FINAL_SUCCESS_PCT, FINAL_REWARD,
@@ -298,8 +300,8 @@ def exp2_task_grid(out_dir: str, metric: str = "latency",
 # EXP 4 — Vehicle density sensitivity
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _exp4_density_plot(out_dir: str, values: Dict[str, Dict[int, float]],
-                       ylabel: str, title: str, fname: str) -> None:
+def _exp4_num_vehicles_plot(out_dir: str, values: Dict[str, Dict[int, float]],
+                            ylabel: str, title: str, fname: str) -> None:
     _apply_style()
     x = np.array(NUMBER_OF_VEHICLE, dtype=float)
     x_smooth = np.linspace(x.min(), x.max(), 160)
@@ -307,10 +309,7 @@ def _exp4_density_plot(out_dir: str, values: Dict[str, Dict[int, float]],
     fig, ax = plt.subplots(figsize=(3.5, 2.5))
     for agent in EXP4_AGENTS:
         y = np.array([values[agent][d] for d in NUMBER_OF_VEHICLE], dtype=float)
-        coeffs = np.polyfit(x, y, deg=min(3, len(x) - 1))
-        y_smooth = np.polyval(coeffs, x_smooth)
-        pad = max((y.max() - y.min()) * 0.10, 1e-6)
-        y_smooth = np.clip(y_smooth, y.min() - pad, y.max() + pad)
+        y_smooth = np.interp(x_smooth, x, y)
         ax.plot(
             x_smooth, y_smooth, linewidth=1.5, color=_agent_color(agent),
             linestyle=_agent_ls(agent), label=AGENT_DISPLAY_NAMES[agent],
@@ -320,7 +319,7 @@ def _exp4_density_plot(out_dir: str, values: Dict[str, Dict[int, float]],
             marker=_agent_marker(agent), linewidth=1.0, zorder=3,
         )
 
-    ax.set_xlabel("Vehicle Density")
+    ax.set_xlabel("Number of Vehicles")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_xticks(NUMBER_OF_VEHICLE)
@@ -330,47 +329,47 @@ def _exp4_density_plot(out_dir: str, values: Dict[str, Dict[int, float]],
     _save(fig, os.path.join(out_dir, "exp4_vehicle_density", fname))
 
 
-def exp4_density_reward(out_dir: str) -> None:
-    """exp4_density_reward.png — reward vs vehicle density."""
-    _exp4_density_plot(
+def exp4_num_vehicles_reward(out_dir: str) -> None:
+    """exp4_num_vehicles_reward.png — reward vs number of vehicles."""
+    _exp4_num_vehicles_plot(
         out_dir,
         EXP4_FINAL_REWARD,
         "Final Reward",
-        "Exp4: Reward vs Vehicle Density",
-        "exp4_density_reward.png",
+        "Exp4: Reward vs Number of Vehicles",
+        "exp4_num_vehicles_reward.png",
     )
 
 
-def exp4_density_latency(out_dir: str) -> None:
-    """exp4_density_latency.png — latency vs vehicle density."""
-    _exp4_density_plot(
+def exp4_num_vehicles_latency(out_dir: str) -> None:
+    """exp4_num_vehicles_latency.png — latency vs number of vehicles."""
+    _exp4_num_vehicles_plot(
         out_dir,
         EXP4_FINAL_LATENCY_MS,
         "Final Avg. Latency (ms)",
-        "Exp4: Latency vs Vehicle Density",
-        "exp4_density_latency.png",
+        "Exp4: Latency vs Number of Vehicles",
+        "exp4_num_vehicles_latency.png",
     )
 
 
-def exp4_density_energy(out_dir: str) -> None:
-    """exp4_density_energy.png — energy vs vehicle density."""
-    _exp4_density_plot(
+def exp4_num_vehicles_energy(out_dir: str) -> None:
+    """exp4_num_vehicles_energy.png — energy vs number of vehicles."""
+    _exp4_num_vehicles_plot(
         out_dir,
         EXP4_FINAL_ENERGY_J,
         "Final Avg. Energy (J)",
-        "Exp4: Energy vs Vehicle Density",
-        "exp4_density_energy.png",
+        "Exp4: Energy vs Number of Vehicles",
+        "exp4_num_vehicles_energy.png",
     )
 
 
-def exp4_density_success(out_dir: str) -> None:
-    """exp4_density_success.png — success rate vs vehicle density."""
-    _exp4_density_plot(
+def exp4_num_vehicles_success(out_dir: str) -> None:
+    """exp4_num_vehicles_success.png — success rate vs number of vehicles."""
+    _exp4_num_vehicles_plot(
         out_dir,
         EXP4_FINAL_SUCCESS_PCT,
         "Task Success Rate (%)",
-        "Exp4: Success Rate vs Vehicle Density",
-        "exp4_density_success.png",
+        "Exp4: Success Rate vs Number of Vehicles",
+        "exp4_num_vehicles_success.png",
     )
 
 
@@ -601,6 +600,99 @@ def task_qos_heatmap(out_dir: str) -> None:
     fig.colorbar(ax.images[0], ax=ax, shrink=0.8)
     fig.tight_layout()
     _save(fig, os.path.join(out_dir, "task_type_analysis", "task_qos_heatmap.png"))
+
+
+def _task_size_metric_plot(
+    out_dir: str,
+    metric: str,
+    seed: int = 42,
+    total_tasks: int = TOTAL_TASKS,
+) -> None:
+    """Plot the fixed task-size analysis values against input size."""
+    _apply_style()
+    tasks = sorted(TASK_SIZE_KB, key=TASK_SIZE_KB.get)
+    x = np.array([TASK_SIZE_KB[t] for t in tasks], dtype=float)
+
+    if metric == "latency":
+        values = TASK_SIZE_PLOT_LATENCY_S
+        ylabel = "Latency (s)"
+        title = "Task Latency vs Task Size"
+        fname = "task_size_latency.png"
+        ylim = None
+    elif metric == "energy":
+        values = TASK_SIZE_PLOT_ENERGY_J
+        ylabel = "Energy (J)"
+        title = "Task Energy vs Task Size"
+        fname = "task_size_energy.png"
+        ylim = None
+    elif metric == "success":
+        values = TASK_SIZE_PLOT_SUCCESS
+        ylabel = "Success Rate"
+        title = "Task Success Rate vs Task Size"
+        fname = "task_size_success.png"
+        ylim = (0.70, 0.96)
+    else:
+        raise ValueError(f"Unsupported task-size metric: {metric}")
+
+    fig, ax = plt.subplots(figsize=(3.5, 3.05))
+    y = np.array([values[t] for t in tasks], dtype=float)
+    ax.plot(
+        x, y,
+        color=_agent_color("ddqn_attention"),
+        linestyle="-",
+        marker=_agent_marker("ddqn_attention"),
+        linewidth=1.5,
+        markersize=4,
+    )
+
+    ax.set_xlim(x.min() - 25.0, x.max() + 25.0)
+    ax.set_xlabel("Task Size (KB)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{v:g}" for v in x], rotation=30, ha="right")
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.grid(True, linestyle=":", linewidth=0.5, alpha=0.65)
+
+    task_handles = [
+        Line2D(
+            [0], [0],
+            color=TASK_COLORS[t],
+            marker="s",
+            linestyle="",
+            markersize=4,
+            label=f"{TASK_DISPLAY_NAMES[t]}: {TASK_SIZE_KB[t]:g} KB",
+        )
+        for t in tasks
+    ]
+    fig.legend(
+        handles=task_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.01),
+        ncol=2,
+        fontsize=6.5,
+        frameon=True,
+        title="Task Type Sizes",
+        title_fontsize=7,
+    )
+    fig.tight_layout(rect=(0, 0.18, 1, 1))
+    _save(fig, os.path.join(out_dir, "task_type_analysis", fname))
+
+
+def task_size_latency_plot(out_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS) -> None:
+    """task_size_latency.png — converged Exp3 latency vs task size."""
+    _task_size_metric_plot(out_dir, "latency", seed, total_tasks)
+
+
+def task_size_energy_plot(out_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS) -> None:
+    """task_size_energy.png — converged Exp3 energy vs task size."""
+    _task_size_metric_plot(out_dir, "energy", seed, total_tasks)
+
+
+def task_size_success_plot(out_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS) -> None:
+    """task_size_success.png — converged Exp3 success rate vs task size."""
+    _task_size_metric_plot(out_dir, "success", seed, total_tasks)
 
 
 def exp2_k_combined_bars(out_dir: str) -> None:
@@ -954,10 +1046,10 @@ def export_all(out_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS,
     exp2_k_combined_bars(out_dir);                         count += 1
 
     # Exp 4
-    exp4_density_reward(out_dir);                           count += 1
-    exp4_density_latency(out_dir);                          count += 1
-    exp4_density_energy(out_dir);                           count += 1
-    exp4_density_success(out_dir);                          count += 1
+    exp4_num_vehicles_reward(out_dir);                      count += 1
+    exp4_num_vehicles_latency(out_dir);                     count += 1
+    exp4_num_vehicles_energy(out_dir);                      count += 1
+    exp4_num_vehicles_success(out_dir);                     count += 1
 
     # Exp 3
     exp3_training_curve(out_dir, "reward",  seed, total_tasks); count += 1
@@ -973,6 +1065,9 @@ def export_all(out_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS,
     task_latency_heatmap(out_dir);                          count += 1
     task_energy_heatmap(out_dir);                           count += 1
     task_qos_heatmap(out_dir);                              count += 1
+    task_size_latency_plot(out_dir, seed, total_tasks);       count += 1
+    task_size_energy_plot(out_dir, seed, total_tasks);        count += 1
+    task_size_success_plot(out_dir, seed, total_tasks);       count += 1
 
     # Ablation
     ablation_attention_reward(out_dir, seed, total_tasks);  count += 1

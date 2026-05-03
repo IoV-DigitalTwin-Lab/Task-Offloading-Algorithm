@@ -129,15 +129,15 @@ def write_exp2(results_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS)
 
 def write_exp4(results_dir: str, seed: int = 42, total_tasks: int = TOTAL_TASKS) -> None:
     """
-    Write Experiment 4 (vehicle-density sensitivity) to TensorBoard.
-    One run per density, with comparison agents under each density.
+    Write Experiment 4 (number-of-vehicles sensitivity) to TensorBoard.
+    One run per vehicle count, with comparison agents under each count.
     """
     run_dir = os.path.join(results_dir, "exp4_vehicle_density")
     exp4 = generate_exp4_curves(seed=seed, total_tasks=total_tasks)
-    for density, bundle in exp4.items():
-        density_dir = os.path.join(run_dir, f"density_{density:03d}")
-        _write_bundle(bundle, density_dir, agents=EXP4_AGENTS)
-    print(f"[TB] Exp4 vehicle density → {run_dir}/  ({len(NUMBER_OF_VEHICLE)} densities)")
+    for num_vehicles, bundle in exp4.items():
+        vehicle_dir = os.path.join(run_dir, f"vehicles_{num_vehicles:03d}")
+        _write_bundle(bundle, vehicle_dir, agents=EXP4_AGENTS)
+    print(f"[TB] Exp4 number of vehicles → {run_dir}/  ({len(NUMBER_OF_VEHICLE)} vehicle counts)")
 
 
 def write_task_type_analysis(

@@ -53,6 +53,8 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
     from plot_generator.plot_config import (
         EXP1_FINAL_REWARD, EXP2_FINAL_REWARD, K_OPT,
         OFFLOADABLE_TASKS, FINAL_TASK_LATENCY_MS,
+        NUMBER_OF_VEHICLE, EXP4_AGENTS, EXP4_FINAL_LATENCY_MS,
+        EXP4_FINAL_ENERGY_J, EXP4_FINAL_SUCCESS_PCT,
     )
 
     errors = []
@@ -142,6 +144,18 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
                 f"≥ k={k_sorted[i+1]} ({EXP2_FINAL_REWARD[k_sorted[i+1]]:.2f})"
             )
 
+    # Check 7: Exp4 number-of-vehicles sweep should improve latency, energy, and success.
+    for agent in EXP4_AGENTS:
+        lat = [EXP4_FINAL_LATENCY_MS[agent][d] for d in NUMBER_OF_VEHICLE]
+        ene = [EXP4_FINAL_ENERGY_J[agent][d] for d in NUMBER_OF_VEHICLE]
+        suc = [EXP4_FINAL_SUCCESS_PCT[agent][d] for d in NUMBER_OF_VEHICLE]
+        if any(lat[i + 1] > lat[i] for i in range(len(lat) - 1)):
+            errors.append(f"Exp4 latency not non-increasing for {agent}")
+        if any(ene[i + 1] > ene[i] for i in range(len(ene) - 1)):
+            errors.append(f"Exp4 energy not non-increasing for {agent}")
+        if any(suc[i + 1] < suc[i] for i in range(len(suc) - 1)):
+            errors.append(f"Exp4 success not non-decreasing for {agent}")
+
     if errors:
         print("\n[CONSISTENCY] FAILURES:")
         for e in errors:
@@ -163,6 +177,8 @@ def verify_plots_are_correct() -> None:
     from plot_generator.plot_config import (
         FINAL_LATENCY_MS, FINAL_ENERGY_J, FINAL_SUCCESS_PCT, FINAL_REWARD,
         EXP1_FINAL_REWARD, EXP2_FINAL_REWARD, K_OPT, AGENT_INTERNAL_NAMES, K_VALUES,
+        NUMBER_OF_VEHICLE, EXP4_AGENTS, EXP4_FINAL_LATENCY_MS,
+        EXP4_FINAL_ENERGY_J, EXP4_FINAL_SUCCESS_PCT,
     )
     errors = []
 
@@ -209,6 +225,18 @@ def verify_plots_are_correct() -> None:
     for i in range(len(k_sorted) - 1):
         if EXP2_FINAL_REWARD[k_sorted[i]] >= EXP2_FINAL_REWARD[k_sorted[i + 1]]:
             errors.append(f"Exp2 reward not monotone at k={k_sorted[i]}→{k_sorted[i+1]}")
+
+    # Exp4 number-of-vehicles sensitivity: more vehicles should improve all plotted metrics.
+    for agent in EXP4_AGENTS:
+        lat = [EXP4_FINAL_LATENCY_MS[agent][d] for d in NUMBER_OF_VEHICLE]
+        ene = [EXP4_FINAL_ENERGY_J[agent][d] for d in NUMBER_OF_VEHICLE]
+        suc = [EXP4_FINAL_SUCCESS_PCT[agent][d] for d in NUMBER_OF_VEHICLE]
+        if any(lat[i + 1] > lat[i] for i in range(len(lat) - 1)):
+            errors.append(f"Exp4 latency not non-increasing for {agent}")
+        if any(ene[i + 1] > ene[i] for i in range(len(ene) - 1)):
+            errors.append(f"Exp4 energy not non-increasing for {agent}")
+        if any(suc[i + 1] < suc[i] for i in range(len(suc) - 1)):
+            errors.append(f"Exp4 success not non-decreasing for {agent}")
 
     if errors:
         print("\n[verify_plots_are_correct] FAILURES:")

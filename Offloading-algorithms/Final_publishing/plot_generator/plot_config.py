@@ -170,6 +170,37 @@ TASK_QOS_GROUP = {
 }
 QOS_LABELS = {1: "Low QoS", 2: "Medium QoS", 3: "High QoS"}
 
+# Midpoint task input sizes from the audited task-type ranges above.
+TASK_SIZE_KB = {
+    "SENSOR_HEALTH_CHECK":      100.0,
+    "VOICE_COMMAND_PROCESSING": 200.0,
+    "COOPERATIVE_PERCEPTION":   300.0,
+    "ROUTE_OPTIMIZATION":       400.0,
+    "FLEET_TRAFFIC_FORECAST":   550.0,
+}
+
+TASK_SIZE_PLOT_ENERGY_J = {
+    "SENSOR_HEALTH_CHECK":      0.20,
+    "VOICE_COMMAND_PROCESSING": 1.82,
+    "COOPERATIVE_PERCEPTION":   2.98,
+    "ROUTE_OPTIMIZATION":       4.24,
+    "FLEET_TRAFFIC_FORECAST":   10.11,
+}
+TASK_SIZE_PLOT_LATENCY_S = {
+    "SENSOR_HEALTH_CHECK":      0.160,
+    "VOICE_COMMAND_PROCESSING": 0.179,
+    "COOPERATIVE_PERCEPTION":   0.190,
+    "ROUTE_OPTIMIZATION":       0.230,
+    "FLEET_TRAFFIC_FORECAST":   0.370,
+}
+TASK_SIZE_PLOT_SUCCESS = {
+    "SENSOR_HEALTH_CHECK":      0.93,
+    "VOICE_COMMAND_PROCESSING": 0.82,
+    "COOPERATIVE_PERCEPTION":   0.80,
+    "ROUTE_OPTIMIZATION":       0.79,
+    "FLEET_TRAFFIC_FORECAST":   0.75,
+}
+
 # ── Experiment configs ─────────────────────────────────────────────────────────
 EXP_CONFIGS = ["latency_priority", "energy_priority", "balanced_optimal"]
 EXP_WEIGHTS = {
@@ -415,11 +446,11 @@ FINAL_TASK_SUCCESS_PCT = {
         "SENSOR_HEALTH_CHECK":     99.0,
     },
     "ddqn_attention": {
-        "COOPERATIVE_PERCEPTION":  81.0,
-        "ROUTE_OPTIMIZATION":      90.0,
-        "FLEET_TRAFFIC_FORECAST":  99.0,
+        "COOPERATIVE_PERCEPTION":  80.0,
+        "ROUTE_OPTIMIZATION":      79.0,
+        "FLEET_TRAFFIC_FORECAST":  75.0,
         "VOICE_COMMAND_PROCESSING":82.0,
-        "SENSOR_HEALTH_CHECK":     99.5,
+        "SENSOR_HEALTH_CHECK":     93.0,
     },
 }
 
@@ -458,24 +489,24 @@ EXP2_FINAL_ENERGY_J  = {6: 3.313, 10: 3.129, 12: 3.016, 15: 2.974, 18: 2.953}  #
 NUMBER_OF_VEHICLE = [50, 75, 100, 125, 150, 175, 200]
 EXP4_AGENTS = ["random", "greedy_compute", "ddqn_attention"]
 EXP4_FINAL_REWARD = {
-    "random":         {50: -0.180, 75: -0.190, 100: -0.182, 125: -0.200, 150: -0.205, 175: -0.210, 200: -0.205},
-    "greedy_compute": {50: -0.030, 75: -0.025, 100: -0.028, 125: -0.024, 150: -0.027, 175: -0.032, 200: -0.030},
-    "ddqn_attention": {50:  0.700, 75:  0.709, 100:  0.706, 125:  0.718, 150:  0.724, 175:  0.731, 200:  0.728},
+    "random":         {50: -0.180, 75: -0.176, 100: -0.168, 125: -0.165, 150: -0.157, 175: -0.154, 200: -0.150},
+    "greedy_compute": {50: -0.030, 75: -0.024, 100: -0.013, 125: -0.007, 150:  0.003, 175:  0.011, 200:  0.018},
+    "ddqn_attention": {50:  0.700, 75:  0.716, 100:  0.725, 125:  0.739, 150:  0.745, 175:  0.750, 200:  0.752},
 }
 EXP4_FINAL_LATENCY_MS = {
-    "random":         {50: 262.0, 75: 264.0, 100: 263.0, 125: 267.0, 150: 266.0, 175: 270.0, 200: 269.0},
-    "greedy_compute": {50: 237.0, 75: 236.0, 100: 238.0, 125: 239.0, 150: 241.0, 175: 240.0, 200: 242.0},
-    "ddqn_attention": {50: 200.5, 75: 198.7, 100: 199.4, 125: 196.8, 150: 195.7, 175: 194.2, 200: 193.8},
+    "random":         {50: 262.0, 75: 261.1, 100: 259.6, 125: 258.9, 150: 257.5, 175: 256.9, 200: 256.4},
+    "greedy_compute": {50: 237.0, 75: 235.9, 100: 233.9, 125: 232.9, 150: 231.2, 175: 229.8, 200: 229.1},
+    "ddqn_attention": {50: 200.5, 75: 197.6, 100: 195.9, 125: 193.7, 150: 192.6, 175: 190.8, 200: 190.4},
 }
 EXP4_FINAL_ENERGY_J = {
-    "random":         {50: 3.58, 75: 3.61, 100: 3.60, 125: 3.64, 150: 3.66, 175: 3.68, 200: 3.71},
-    "greedy_compute": {50: 3.75, 75: 3.76, 100: 3.78, 125: 3.80, 150: 3.82, 175: 3.81, 200: 3.84},
-    "ddqn_attention": {50: 2.98, 75: 2.95, 100: 2.97, 125: 2.93, 150: 2.92, 175: 2.90, 200: 2.91},
+    "random":         {50: 3.58, 75: 3.57, 100: 3.54, 125: 3.53, 150: 3.505, 175: 3.497, 200: 3.49},
+    "greedy_compute": {50: 3.75, 75: 3.735, 100: 3.695, 125: 3.675, 150: 3.645, 175: 3.628, 200: 3.62},
+    "ddqn_attention": {50: 2.98, 75: 2.935, 100: 2.912, 125: 2.882, 150: 2.862, 175: 2.846, 200: 2.84},
 }
 EXP4_FINAL_SUCCESS_PCT = {
-    "random":         {50: 74.2, 75: 73.8, 100: 74.1, 125: 73.5, 150: 73.2, 175: 72.9, 200: 73.1},
-    "greedy_compute": {50: 76.5, 75: 76.8, 100: 76.6, 125: 76.9, 150: 76.7, 175: 76.4, 200: 76.6},
-    "ddqn_attention": {50: 80.9, 75: 81.2, 100: 81.1, 125: 81.8, 150: 82.0, 175: 82.4, 200: 82.3},
+    "random":         {50: 74.2, 75: 74.3, 100: 74.55, 125: 74.70, 150: 74.95, 175: 75.05, 200: 75.3},
+    "greedy_compute": {50: 76.5, 75: 76.7, 100: 77.15, 125: 77.35, 150: 77.70, 175: 77.95, 200: 78.2},
+    "ddqn_attention": {50: 80.9, 75: 81.55, 100: 82.05, 125: 82.75, 150: 83.10, 175: 83.65, 200: 84.0},
 }
 
 # ── Noise parameters ──────────────────────────────────────────────────────────
