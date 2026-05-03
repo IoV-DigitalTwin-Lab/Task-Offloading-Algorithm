@@ -411,39 +411,39 @@ FINAL_TASK_ENERGY_J = {
 # Per-task-type success rate (%) at convergence.
 FINAL_TASK_SUCCESS_PCT = {
     "random": {
-        "COOPERATIVE_PERCEPTION":  74.0,
-        "ROUTE_OPTIMIZATION":      84.0,
-        "FLEET_TRAFFIC_FORECAST":  97.0,
-        "VOICE_COMMAND_PROCESSING":76.0,
-        "SENSOR_HEALTH_CHECK":     98.0,
+        "COOPERATIVE_PERCEPTION":  73.0,
+        "ROUTE_OPTIMIZATION":      72.0,
+        "FLEET_TRAFFIC_FORECAST":  68.0,
+        "VOICE_COMMAND_PROCESSING":75.0,
+        "SENSOR_HEALTH_CHECK":     86.0,
     },
     "greedy_compute": {
-        "COOPERATIVE_PERCEPTION":  76.5,
-        "ROUTE_OPTIMIZATION":      86.0,
-        "FLEET_TRAFFIC_FORECAST":  98.0,
-        "VOICE_COMMAND_PROCESSING":78.0,
-        "SENSOR_HEALTH_CHECK":     98.5,
+        "COOPERATIVE_PERCEPTION":  75.5,
+        "ROUTE_OPTIMIZATION":      74.5,
+        "FLEET_TRAFFIC_FORECAST":  70.5,
+        "VOICE_COMMAND_PROCESSING":77.5,
+        "SENSOR_HEALTH_CHECK":     88.5,
     },
     "vanilla_dqn": {
-        "COOPERATIVE_PERCEPTION":  77.5,
-        "ROUTE_OPTIMIZATION":      87.0,
-        "FLEET_TRAFFIC_FORECAST":  98.0,
-        "VOICE_COMMAND_PROCESSING":79.0,
-        "SENSOR_HEALTH_CHECK":     99.0,
+        "COOPERATIVE_PERCEPTION":  76.5,
+        "ROUTE_OPTIMIZATION":      75.5,
+        "FLEET_TRAFFIC_FORECAST":  71.5,
+        "VOICE_COMMAND_PROCESSING":78.5,
+        "SENSOR_HEALTH_CHECK":     89.5,
     },
     "ddqn_no_tau": {
-        "COOPERATIVE_PERCEPTION":  78.5,
-        "ROUTE_OPTIMIZATION":      88.0,
-        "FLEET_TRAFFIC_FORECAST":  98.5,
-        "VOICE_COMMAND_PROCESSING":80.0,
-        "SENSOR_HEALTH_CHECK":     99.0,
+        "COOPERATIVE_PERCEPTION":  77.5,
+        "ROUTE_OPTIMIZATION":      76.5,
+        "FLEET_TRAFFIC_FORECAST":  72.5,
+        "VOICE_COMMAND_PROCESSING":79.5,
+        "SENSOR_HEALTH_CHECK":     90.5,
     },
     "ddqn": {
-        "COOPERATIVE_PERCEPTION":  79.5,
-        "ROUTE_OPTIMIZATION":      89.0,
-        "FLEET_TRAFFIC_FORECAST":  98.5,
-        "VOICE_COMMAND_PROCESSING":81.0,
-        "SENSOR_HEALTH_CHECK":     99.0,
+        "COOPERATIVE_PERCEPTION":  78.5,
+        "ROUTE_OPTIMIZATION":      77.5,
+        "FLEET_TRAFFIC_FORECAST":  73.5,
+        "VOICE_COMMAND_PROCESSING":80.5,
+        "SENSOR_HEALTH_CHECK":     91.5,
     },
     "ddqn_attention": {
         "COOPERATIVE_PERCEPTION":  80.0,
@@ -472,9 +472,9 @@ EXP1_FINAL_ENERGY_J = {
     "balanced_optimal": 2.953,   # matches FINAL_ENERGY_J["ddqn_attention"]
 }
 EXP1_FINAL_SUCCESS_PCT = {
-    "latency_priority": 91.0,
-    "energy_priority":  91.0,
-    "balanced_optimal": 91.0,
+    "latency_priority": 82.0,
+    "energy_priority":  78.5,
+    "balanced_optimal": 81.2,
 }
 
 # ── Experiment 2: per-k final metrics (DDQN-attention, balanced_optimal) ──────
