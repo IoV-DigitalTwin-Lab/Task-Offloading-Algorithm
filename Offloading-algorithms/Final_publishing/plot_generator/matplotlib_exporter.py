@@ -163,8 +163,8 @@ def exp1_latency_pareto(out_dir: str) -> None:
         sz     = 90  if cfg == "balanced_optimal" else 50
         ax.scatter(l, e, color=CONFIG_COLORS[cfg], zorder=5, s=sz, marker=marker,
                    edgecolors="black", linewidths=0.5)
-        offset = {"latency_priority": (-6, 0.003), "energy_priority": (0.5, 0.003),
-                  "balanced_optimal": (0.5, -0.007)}
+        offset = {"latency_priority": (-55, 0.012), "energy_priority": (8, 0.012),
+                  "balanced_optimal": (8, -0.024)}
         dx, dy = offset[cfg]
         ax.annotate(cfg.replace("_", "\n"), (l + dx, e + dy), fontsize=6.5)
 
@@ -309,7 +309,11 @@ def _exp4_num_vehicles_plot(out_dir: str, values: Dict[str, Dict[int, float]],
     fig, ax = plt.subplots(figsize=(3.5, 2.5))
     for agent in EXP4_AGENTS:
         y = np.array([values[agent][d] for d in NUMBER_OF_VEHICLE], dtype=float)
-        y_smooth = np.interp(x_smooth, x, y)
+        try:
+            from scipy.interpolate import PchipInterpolator
+            y_smooth = PchipInterpolator(x, y)(x_smooth)
+        except Exception:
+            y_smooth = np.interp(x_smooth, x, y)
         ax.plot(
             x_smooth, y_smooth, linewidth=1.5, color=_agent_color(agent),
             linestyle=_agent_ls(agent), label=AGENT_DISPLAY_NAMES[agent],
@@ -547,16 +551,11 @@ def task_latency_heatmap(out_dir: str) -> None:
         [FINAL_TASK_LATENCY_MS[a][t] for a in AGENT_INTERNAL_NAMES]
         for t in OFFLOADABLE_TASKS
     ])
-    matrix_display = matrix.copy()
-    fleet_idx = OFFLOADABLE_TASKS.index("FLEET_TRAFFIC_FORECAST")
-    matrix_display[fleet_idx, :] /= 100.0  # Fleet shown in units of 100 ms
-
     fig, ax = plt.subplots(figsize=(7.16, 3.0))
     row_labels = [TASK_SHORT[t] for t in OFFLOADABLE_TASKS]
-    row_labels[fleet_idx] += " (×100ms)"
     col_labels = [AGENT_DISPLAY_NAMES[a] for a in AGENT_INTERNAL_NAMES]
-    _heatmap(matrix_display, row_labels, col_labels, ax,
-             "Final Avg. Latency (ms), Fleet in ×100 ms units", fmt=".0f", cmap="RdYlGn_r")
+    _heatmap(matrix, row_labels, col_labels, ax,
+             "Final Avg. Latency (ms)", fmt=".0f", cmap="RdYlGn_r")
     fig.colorbar(ax.images[0], ax=ax, shrink=0.8)
     fig.tight_layout()
     _save(fig, os.path.join(out_dir, "task_type_analysis", "task_latency_heatmap.png"))
@@ -569,17 +568,11 @@ def task_energy_heatmap(out_dir: str) -> None:
         [FINAL_TASK_ENERGY_J[a][t] for a in AGENT_INTERNAL_NAMES]
         for t in OFFLOADABLE_TASKS
     ])
-    # FLEET energy is ~13× larger; scale it for display
-    matrix_display = matrix.copy()
-    fleet_idx = OFFLOADABLE_TASKS.index("FLEET_TRAFFIC_FORECAST")
-    matrix_display[fleet_idx, :] /= 10.0  # Fleet in units of 10 J
-
     fig, ax = plt.subplots(figsize=(7.16, 3.0))
     row_labels = [TASK_SHORT[t] for t in OFFLOADABLE_TASKS]
-    row_labels[fleet_idx] += " (×10J)"
     col_labels = [AGENT_DISPLAY_NAMES[a] for a in AGENT_INTERNAL_NAMES]
-    _heatmap(matrix_display, row_labels, col_labels, ax,
-             "Final Avg. Energy (J/task), Fleet in ×10 J units", fmt=".3f", cmap="RdYlGn_r")
+    _heatmap(matrix, row_labels, col_labels, ax,
+             "Final Avg. Energy (J/task)", fmt=".3f", cmap="RdYlGn_r")
     fig.colorbar(ax.images[0], ax=ax, shrink=0.8)
     fig.tight_layout()
     _save(fig, os.path.join(out_dir, "task_type_analysis", "task_energy_heatmap.png"))

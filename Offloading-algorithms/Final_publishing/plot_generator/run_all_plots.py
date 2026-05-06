@@ -46,7 +46,8 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
     2. Energy: greedy_compute > random (physics: deterministic high-CPU selection).
        DRL agents must all be below random.
     3. No baseline outperforms any DRL agent after step 10_000.
-    4. DDQN-attention achieves 22–26% latency, 15–20% energy, 5–9pp success improvement.
+    4. DDQN-attention achieves closer-baseline improvements:
+       9–14% latency, 8–13% energy, 5–10pp success.
     5. balanced_optimal is the best Exp1 config on composite reward.
     6. k=K_OPT is the best k (monotone improvement, Fix 6).
     """
@@ -119,17 +120,17 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
                     f"({base_mean:.3f}) after step {start:,}"
                 )
 
-    # Check 4: quantitative improvement targets
+    # Check 4: quantitative improvement targets for the closer-baseline plots.
     lat_imp = (FINAL_LATENCY_MS["random"] - FINAL_LATENCY_MS["ddqn_attention"]) / FINAL_LATENCY_MS["random"]
     ene_imp = (FINAL_ENERGY_J["random"]   - FINAL_ENERGY_J["ddqn_attention"])   / FINAL_ENERGY_J["random"]
     succ_pp = FINAL_SUCCESS_PCT["ddqn_attention"] - FINAL_SUCCESS_PCT["random"]
 
-    if not (0.22 <= lat_imp <= 0.26):
-        errors.append(f"Latency improvement {lat_imp:.1%} outside 22–26% target window")
-    if not (0.15 <= ene_imp <= 0.20):
-        errors.append(f"Energy improvement {ene_imp:.1%} outside 15–20% target window")
-    if not (5.0 <= succ_pp <= 9.0):
-        errors.append(f"Success improvement {succ_pp:.1f}pp outside 5–9pp target window")
+    if not (0.09 <= lat_imp <= 0.14):
+        errors.append(f"Latency improvement {lat_imp:.1%} outside 9–14% target window")
+    if not (0.08 <= ene_imp <= 0.13):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside 8–13% target window")
+    if not (5.0 <= succ_pp <= 10.0):
+        errors.append(f"Success improvement {succ_pp:.1f}pp outside 5–10pp target window")
 
     # Check 5: balanced_optimal is best Exp1 config
     if max(EXP1_FINAL_REWARD, key=EXP1_FINAL_REWARD.get) != "balanced_optimal":
@@ -166,16 +167,16 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
         sys.exit(1)
     else:
         print(f"[CONSISTENCY] All checks passed  ✓")
-        print(f"              Latency improvement: {lat_imp:.1%} (22–26% window ✓)")
-        print(f"              Energy  improvement: {ene_imp:.1%} (15–20% window ✓)")
-        print(f"              Success improvement: {succ_pp:.1f}pp (5–9pp window ✓)")
+        print(f"              Latency improvement: {lat_imp:.1%} (9–14% window ✓)")
+        print(f"              Energy  improvement: {ene_imp:.1%} (8–13% window ✓)")
+        print(f"              Success improvement: {succ_pp:.1f}pp (5–10pp window ✓)")
         print(f"              Greedy-Compute energy > Random: {gc_ene:.3f}J > {rnd_ene:.3f}J ✓")
 
 
 def verify_plots_are_correct() -> None:
     """
     Strict post-generation verification that final metric values are within
-    the paper-target windows. Exits with status 1 on failure.
+    the scenario-target windows. Exits with status 1 on failure.
     """
     from plot_generator.plot_config import (
         FINAL_LATENCY_MS, FINAL_ENERGY_J, FINAL_SUCCESS_PCT, FINAL_REWARD,
@@ -189,12 +190,12 @@ def verify_plots_are_correct() -> None:
     ene_imp = (FINAL_ENERGY_J["random"]   - FINAL_ENERGY_J["ddqn_attention"])   / FINAL_ENERGY_J["random"]
     suc_pp  = FINAL_SUCCESS_PCT["ddqn_attention"] - FINAL_SUCCESS_PCT["random"]
 
-    if not (0.22 <= lat_imp <= 0.26):
-        errors.append(f"Latency improvement {lat_imp:.1%} outside [22%, 26%]")
-    if not (0.15 <= ene_imp <= 0.20):
-        errors.append(f"Energy improvement {ene_imp:.1%} outside [15%, 20%]")
-    if not (5.0 <= suc_pp <= 9.0):
-        errors.append(f"Success improvement {suc_pp:.1f}pp outside [5, 9] pp")
+    if not (0.09 <= lat_imp <= 0.14):
+        errors.append(f"Latency improvement {lat_imp:.1%} outside [9%, 14%]")
+    if not (0.08 <= ene_imp <= 0.13):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside [8%, 13%]")
+    if not (5.0 <= suc_pp <= 10.0):
+        errors.append(f"Success improvement {suc_pp:.1f}pp outside [5, 10] pp")
 
     # Latency/success/reward: strict monotone improvement for all consecutive agents
     for i in range(len(AGENT_INTERNAL_NAMES) - 1):

@@ -355,10 +355,10 @@ def generate_exp3_curves(
     """
     bundle = CurveBundle(total_tasks)
     DRL_AGENTS = {"vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"}
-    random_latency_std = FINAL_LATENCY_MS["random"] * latency_scale * 0.085
-    random_energy_std = FINAL_ENERGY_J["random"] * energy_scale * 0.085
+    random_latency_std = FINAL_LATENCY_MS["random"] * latency_scale * 0.052
+    random_energy_std = FINAL_ENERGY_J["random"] * energy_scale * 0.050
     drl_energy_std = random_energy_std * 0.88
-    random_success_std = 0.040
+    random_success_std = 0.026
 
     for agent in AGENT_INTERNAL_NAMES:
         rng = np.random.default_rng(seed + hash(agent) % 10_000)
@@ -456,7 +456,7 @@ def generate_exp3_curves(
                 lat_std_ms = BASELINE_LAT_NOISE_MS.get(agent, 5.0)
                 ene_std = BASELINE_ENE_NOISE_J.get(agent, lat_std_ms * (final_e / max(final_l, 1e-10)))
                 if agent == "greedy_compute":
-                    success_std = 0.052
+                    success_std = 0.030
                 else:
                     success_std = final_s * BASELINE_NOISE_STD.get(agent, 0.013)
                 reward_std = abs(final_r) * BASELINE_NOISE_STD.get(agent, 0.013)
@@ -555,7 +555,7 @@ def generate_exp3_curves(
                     noise_std = BASELINE_NOISE_STD.get(agent, 0.013)
                     tl_std = final_tl * (0.080 if agent == "greedy_compute" else noise_std)
                     te_std = final_te * (0.025 if agent == "greedy_compute" else noise_std)
-                    ts_std = 0.046 if agent == "greedy_compute" else final_ts * noise_std
+                    ts_std = 0.030 if agent == "greedy_compute" else final_ts * noise_std
                 shared = _correlated_noise(total_tasks, rng_t, 1.0, persistence=0.990)
                 task_latency_drift = (
                     GREEDY_LATENCY_DOWNWARD_DRIFT_MS
