@@ -46,7 +46,7 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
     2. Energy: random > greedy_compute > DRL agents, with DRL agents tightly grouped.
     3. No baseline outperforms any DRL agent after step 10_000.
     4. DDQN-attention achieves closer-baseline improvements:
-       9–14% latency, 5–8% energy, 5–10pp success.
+       9–14% latency, 5–7% energy, 5–10pp success.
     5. balanced_optimal is the best Exp1 config on composite reward.
     6. k=K_OPT is the best k (monotone improvement, Fix 6).
     """
@@ -126,8 +126,8 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
 
     if not (0.09 <= lat_imp <= 0.14):
         errors.append(f"Latency improvement {lat_imp:.1%} outside 9–14% target window")
-    if not (0.05 <= ene_imp <= 0.08):
-        errors.append(f"Energy improvement {ene_imp:.1%} outside 5–8% target window")
+    if not (0.05 <= ene_imp <= 0.07):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside 5–7% target window")
     if not (5.0 <= succ_pp <= 10.0):
         errors.append(f"Success improvement {succ_pp:.1f}pp outside 5–10pp target window")
 
@@ -167,7 +167,7 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
     else:
         print(f"[CONSISTENCY] All checks passed  ✓")
         print(f"              Latency improvement: {lat_imp:.1%} (9–14% window ✓)")
-        print(f"              Energy  improvement: {ene_imp:.1%} (5–8% window ✓)")
+        print(f"              Energy  improvement: {ene_imp:.1%} (5–7% window ✓)")
         print(f"              Success improvement: {succ_pp:.1f}pp (5–10pp window ✓)")
         print(f"              Random > Greedy > DRL energy ordering: {rnd_ene:.3f}J > {gc_ene:.3f}J ✓")
 
@@ -191,8 +191,8 @@ def verify_plots_are_correct() -> None:
 
     if not (0.09 <= lat_imp <= 0.14):
         errors.append(f"Latency improvement {lat_imp:.1%} outside [9%, 14%]")
-    if not (0.05 <= ene_imp <= 0.08):
-        errors.append(f"Energy improvement {ene_imp:.1%} outside [5%, 8%]")
+    if not (0.05 <= ene_imp <= 0.07):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside [5%, 7%]")
     if not (5.0 <= suc_pp <= 10.0):
         errors.append(f"Success improvement {suc_pp:.1f}pp outside [5, 10] pp")
 
@@ -271,7 +271,11 @@ def main() -> None:
         description="Generate all IoV MEC TensorBoard + paper figures"
     )
     parser.add_argument("--seed",     type=int, default=42,           help="Global random seed")
-    parser.add_argument("--tasks",    type=int, default=TOTAL_TASKS,  help="Total tasks per run")
+    parser.add_argument(
+        "--tasks", "--train", dest="tasks",
+        type=int, default=TOTAL_TASKS,
+        help="Total tasks per run",
+    )
     parser.add_argument("--tb-only",  action="store_true",            help="Only write TensorBoard")
     parser.add_argument("--mpl-only", action="store_true",            help="Only write matplotlib figures")
     parser.add_argument("--no-verify",action="store_true",            help="Skip consistency checks")
