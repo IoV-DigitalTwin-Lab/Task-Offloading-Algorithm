@@ -100,10 +100,13 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
                     f"Per-task latency ordering [{ttype}]: {a1}={l1:.1f} vs {a2}={l2:.1f}"
                 )
 
-    # Check 3: DRL beats baselines after 10k tasks
+    # Check 3: DRL beats baselines after the reference 10k-task point, scaled
+    # to the requested run length so non-default --tasks values keep the same
+    # relative training timeline as the 20k-task plots.
     bundle = generate_exp3_curves(seed=seed, total_tasks=total_tasks)
-    win = 1000
-    start = 10_000
+    task_scale = total_tasks / float(TOTAL_TASKS)
+    start = min(total_tasks - 1, max(0, int(round(10_000 * task_scale))))
+    win = min(max(1, int(round(1_000 * task_scale))), total_tasks - start)
     DRL_AGENTS  = ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]
     BASE_AGENTS = ["random", "greedy_compute"]
     for drl in DRL_AGENTS:

@@ -61,6 +61,44 @@ LATENCY_OVERALL_VARIATION_FRAC = {
 }
 FLAT_QOS_BASELINE_AGENTS = {"random", "greedy_compute"}
 
+def _scale_reference_step(reference_step: int, total_tasks: int) -> int:
+    """
+    Scale a task index calibrated for TOTAL_TASKS onto the current run length.
+
+    The calibrated phase/convergence constants in plot_config.py describe the
+    20k-task reference plots. When a longer run is requested, keep the same
+    visual learning timeline as a fraction of the x-axis instead of converging
+    in the first few percent of the plot.
+    """
+    if total_tasks <= 1:
+        return 0
+    scale = total_tasks / float(TOTAL_TASKS)
+    return int(np.clip(round(reference_step * scale), 1, total_tasks - 1))
+
+
+def _agent_phase_steps(agent: str, total_tasks: int) -> Tuple[int, int, int]:
+    """Return phase-2 start, phase-3 start, and convergence step for this run."""
+    p2_default = int(total_tasks * PHASE2_START_FRAC)
+    p3_default = int(total_tasks * PHASE3_START_FRAC)
+
+    p2s = (
+        _scale_reference_step(AGENT_PHASE2_START[agent], total_tasks)
+        if agent in AGENT_PHASE2_START else p2_default
+    )
+    p3s = (
+        _scale_reference_step(AGENT_PHASE3_START[agent], total_tasks)
+        if agent in AGENT_PHASE3_START else p3_default
+    )
+    conv = (
+        _scale_reference_step(CONVERGENCE_TASKS[agent], total_tasks)
+        if agent in CONVERGENCE_TASKS else total_tasks
+    )
+
+    p2s = int(np.clip(p2s, 0, max(total_tasks - 2, 0)))
+    p3s = int(np.clip(p3s, p2s + 1, total_tasks))
+    conv = int(np.clip(conv, 1, total_tasks))
+    return p2s, p3s, conv
+
 def _running_mean(arr: np.ndarray, window: int) -> np.ndarray:
     """Causal running mean (pandas-like but pure numpy)."""
     out = np.empty_like(arr)
@@ -333,9 +371,7 @@ def generate_exp3_curves(
         final_e_curve = final_e + ENERGY_CONVERGENCE_VISUAL_LIFT_J.get(agent, 0.0) * energy_scale
         final_l_curve = final_l - LATENCY_CONVERGENCE_VISUAL_GAIN_MS.get(agent, 0.0) * latency_scale
 
-        p2s  = AGENT_PHASE2_START.get(agent, int(total_tasks * PHASE2_START_FRAC))
-        p3s  = AGENT_PHASE3_START.get(agent, int(total_tasks * PHASE3_START_FRAC))
-        conv = CONVERGENCE_TASKS.get(agent, total_tasks)
+        p2s, p3s, conv = _agent_phase_steps(agent, total_tasks)
 
         if agent in DRL_AGENTS:
             osc = DRL_NOISE_SCALE[agent] / 0.10
