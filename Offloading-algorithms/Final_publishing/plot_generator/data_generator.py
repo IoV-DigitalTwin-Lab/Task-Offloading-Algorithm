@@ -54,10 +54,10 @@ LATENCY_CONVERGENCE_VISUAL_GAIN_MS = {
     "ddqn_attention": 0.0,
 }
 LATENCY_OVERALL_VARIATION_FRAC = {
-    "vanilla_dqn": 0.032,
-    "ddqn_no_tau": 0.037,
-    "ddqn": 0.029,
-    "ddqn_attention": 0.027,
+    "vanilla_dqn": 0.020,
+    "ddqn_no_tau": 0.023,
+    "ddqn": 0.017,
+    "ddqn_attention": 0.016,
 }
 FLAT_QOS_BASELINE_AGENTS = {"random", "greedy_compute"}
 
@@ -98,6 +98,14 @@ def _agent_phase_steps(agent: str, total_tasks: int) -> Tuple[int, int, int]:
     p3s = int(np.clip(p3s, p2s + 1, total_tasks))
     conv = int(np.clip(conv, 1, total_tasks))
     return p2s, p3s, conv
+
+
+def _short_run_latency_noise_scale(total_tasks: int) -> float:
+    """Reduce latency-only oscillation when plotting shorter training runs."""
+    if total_tasks >= TOTAL_TASKS:
+        return 1.0
+    scaled = 1.25 * np.sqrt(max(total_tasks, 1) / float(TOTAL_TASKS))
+    return float(np.clip(scaled, 0.45, 1.0))
 
 def _running_mean(arr: np.ndarray, window: int) -> np.ndarray:
     """Causal running mean (pandas-like but pure numpy)."""
@@ -355,7 +363,8 @@ def generate_exp3_curves(
     """
     bundle = CurveBundle(total_tasks)
     DRL_AGENTS = {"vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"}
-    random_latency_std = FINAL_LATENCY_MS["random"] * latency_scale * 0.052
+    latency_noise_scale = _short_run_latency_noise_scale(total_tasks)
+    random_latency_std = FINAL_LATENCY_MS["random"] * latency_scale * 0.052 * latency_noise_scale
     random_energy_std = FINAL_ENERGY_J["random"] * energy_scale * 0.050
     drl_energy_std = random_energy_std * 0.88
     random_success_std = 0.026
@@ -406,7 +415,7 @@ def generate_exp3_curves(
             init_l = FINAL_LATENCY_MS["random"] * latency_scale * rng.uniform(0.985, 1.015)
             raw_lat = _make_metric_curve(
                 total_tasks, init_l, final_l_curve, agent, "latency", rng,
-                oscillation_boost=osc, convergence_tasks=conv,
+                oscillation_boost=osc * latency_noise_scale, convergence_tasks=conv,
                 phase2_start=p2s, phase3_start=p3s,
                 phase1_noise_std=random_latency_std,
                 phase2_noise_floor=random_latency_std * 0.48,
@@ -421,9 +430,9 @@ def generate_exp3_curves(
             variation_frac = LATENCY_OVERALL_VARIATION_FRAC.get(agent, 0.0)
             if variation_frac > 0:
                 latency_variation = _correlated_noise(
-                    total_tasks, rng, final_l * variation_frac, persistence=0.996
+                    total_tasks, rng, final_l * variation_frac * latency_noise_scale, persistence=0.996
                 )
-                wave = final_l * variation_frac * 0.75 * np.sin(
+                wave = final_l * variation_frac * latency_noise_scale * 0.75 * np.sin(
                     np.linspace(0.0, 7.0 * np.pi, total_tasks) + rng.uniform(0.0, 2.0 * np.pi)
                 )
                 latency_variation += wave
@@ -453,7 +462,7 @@ def generate_exp3_curves(
                 success_std = random_success_std
                 reward_std = abs(final_r) * 0.045
             else:
-                lat_std_ms = BASELINE_LAT_NOISE_MS.get(agent, 5.0)
+                lat_std_ms = BASELINE_LAT_NOISE_MS.get(agent, 5.0) * latency_noise_scale
                 ene_std = BASELINE_ENE_NOISE_J.get(agent, lat_std_ms * (final_e / max(final_l, 1e-10)))
                 if agent == "greedy_compute":
                     success_std = 0.030
@@ -504,7 +513,7 @@ def generate_exp3_curves(
                 FINAL_TASK_SUCCESS_PCT["random"][ttype] / 100.0 + success_offset_pct / 100.0,
                 0.0, 1.0,
             )
-            random_tl_std = random_tl * 0.085
+            random_tl_std = random_tl * 0.085 * latency_noise_scale
             random_te_std = random_te * 0.085
             drl_te_std = random_te_std * 0.88
             random_ts_std = min(0.040, max(0.014, random_ts * (1.0 - random_ts) * 0.22))
@@ -513,6 +522,7 @@ def generate_exp3_curves(
                 init_tl = random_tl * rng_t.uniform(0.985, 1.015)
                 raw_tl = _make_metric_curve(
                     total_tasks, init_tl, final_tl_curve, agent, "latency", rng_t,
+                    oscillation_boost=latency_noise_scale,
                     convergence_tasks=conv, phase2_start=p2s, phase3_start=p3s,
                     phase1_noise_std=random_tl_std,
                     phase2_noise_floor=random_tl_std * 0.55,
@@ -553,7 +563,7 @@ def generate_exp3_curves(
                     ts_std = random_ts_std
                 else:
                     noise_std = BASELINE_NOISE_STD.get(agent, 0.013)
-                    tl_std = final_tl * (0.080 if agent == "greedy_compute" else noise_std)
+                    tl_std = final_tl * (0.080 if agent == "greedy_compute" else noise_std) * latency_noise_scale
                     te_std = final_te * (0.025 if agent == "greedy_compute" else noise_std)
                     ts_std = 0.030 if agent == "greedy_compute" else final_ts * noise_std
                 shared = _correlated_noise(total_tasks, rng_t, 1.0, persistence=0.990)

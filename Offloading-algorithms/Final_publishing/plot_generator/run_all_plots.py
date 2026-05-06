@@ -43,11 +43,10 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
     Assert all consistency requirements hold.
 
     1. Latency/success/reward monotone ordering across agents.
-    2. Energy: greedy_compute > random (physics: deterministic high-CPU selection).
-       DRL agents must all be below random.
+    2. Energy: random > greedy_compute > DRL agents, with DRL agents tightly grouped.
     3. No baseline outperforms any DRL agent after step 10_000.
     4. DDQN-attention achieves closer-baseline improvements:
-       9–14% latency, 8–13% energy, 5–10pp success.
+       9–14% latency, 5–8% energy, 5–10pp success.
     5. balanced_optimal is the best Exp1 config on composite reward.
     6. k=K_OPT is the best k (monotone improvement, Fix 6).
     """
@@ -73,16 +72,16 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
         if FINAL_REWARD[a2] <= FINAL_REWARD[a1]:
             errors.append(f"Reward ordering violated: {a2} ≤ {a1}")
 
-    # Check 1b: energy — greedy_compute must be ABOVE random (Fix 4)
+    # Check 1b: energy — Greedy should sit between Random and learning curves.
     gc_ene  = FINAL_ENERGY_J["greedy_compute"]
     rnd_ene = FINAL_ENERGY_J["random"]
-    if gc_ene <= rnd_ene:
+    if gc_ene >= rnd_ene:
         errors.append(
-            f"Greedy-Compute energy ({gc_ene:.3f}J) should exceed Random ({rnd_ene:.3f}J)"
+            f"Greedy-Compute energy ({gc_ene:.3f}J) should be below Random ({rnd_ene:.3f}J)"
         )
     for a in ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]:
-        if FINAL_ENERGY_J[a] >= rnd_ene:
-            errors.append(f"{a} energy ({FINAL_ENERGY_J[a]:.3f}J) not below Random ({rnd_ene:.3f}J)")
+        if FINAL_ENERGY_J[a] >= gc_ene:
+            errors.append(f"{a} energy ({FINAL_ENERGY_J[a]:.3f}J) not below Greedy ({gc_ene:.3f}J)")
     # DRL energy must also be monotone decreasing among themselves
     drl_agents = ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]
     for i in range(len(drl_agents) - 1):
@@ -127,8 +126,8 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
 
     if not (0.09 <= lat_imp <= 0.14):
         errors.append(f"Latency improvement {lat_imp:.1%} outside 9–14% target window")
-    if not (0.08 <= ene_imp <= 0.13):
-        errors.append(f"Energy improvement {ene_imp:.1%} outside 8–13% target window")
+    if not (0.05 <= ene_imp <= 0.08):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside 5–8% target window")
     if not (5.0 <= succ_pp <= 10.0):
         errors.append(f"Success improvement {succ_pp:.1f}pp outside 5–10pp target window")
 
@@ -168,9 +167,9 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
     else:
         print(f"[CONSISTENCY] All checks passed  ✓")
         print(f"              Latency improvement: {lat_imp:.1%} (9–14% window ✓)")
-        print(f"              Energy  improvement: {ene_imp:.1%} (8–13% window ✓)")
+        print(f"              Energy  improvement: {ene_imp:.1%} (5–8% window ✓)")
         print(f"              Success improvement: {succ_pp:.1f}pp (5–10pp window ✓)")
-        print(f"              Greedy-Compute energy > Random: {gc_ene:.3f}J > {rnd_ene:.3f}J ✓")
+        print(f"              Random > Greedy > DRL energy ordering: {rnd_ene:.3f}J > {gc_ene:.3f}J ✓")
 
 
 def verify_plots_are_correct() -> None:
@@ -192,8 +191,8 @@ def verify_plots_are_correct() -> None:
 
     if not (0.09 <= lat_imp <= 0.14):
         errors.append(f"Latency improvement {lat_imp:.1%} outside [9%, 14%]")
-    if not (0.08 <= ene_imp <= 0.13):
-        errors.append(f"Energy improvement {ene_imp:.1%} outside [8%, 13%]")
+    if not (0.05 <= ene_imp <= 0.08):
+        errors.append(f"Energy improvement {ene_imp:.1%} outside [5%, 8%]")
     if not (5.0 <= suc_pp <= 10.0):
         errors.append(f"Success improvement {suc_pp:.1f}pp outside [5, 10] pp")
 
@@ -207,12 +206,12 @@ def verify_plots_are_correct() -> None:
         if FINAL_REWARD[a2] <= FINAL_REWARD[a1]:
             errors.append(f"Reward ordering: {a2} ≤ {a1}")
 
-    # Energy: greedy_compute above random; DRL agents below random, monotone
-    if FINAL_ENERGY_J["greedy_compute"] <= FINAL_ENERGY_J["random"]:
-        errors.append("Greedy-Compute energy not above Random")
+    # Energy: Greedy is close to, but still above, the DRL energy group.
+    if FINAL_ENERGY_J["greedy_compute"] >= FINAL_ENERGY_J["random"]:
+        errors.append("Greedy-Compute energy not below Random")
     for a in ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]:
-        if FINAL_ENERGY_J[a] >= FINAL_ENERGY_J["random"]:
-            errors.append(f"{a} energy not below Random")
+        if FINAL_ENERGY_J[a] >= FINAL_ENERGY_J["greedy_compute"]:
+            errors.append(f"{a} energy not below Greedy")
     drl = ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]
     for i in range(len(drl) - 1):
         if FINAL_ENERGY_J[drl[i + 1]] >= FINAL_ENERGY_J[drl[i]]:

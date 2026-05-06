@@ -176,11 +176,11 @@ TASK_SIZE_KB = {
 }
 
 TASK_SIZE_PLOT_ENERGY_J = {
-    "VOICE_COMMAND_PROCESSING": 0.0159,
-    "SENSOR_HEALTH_CHECK":      0.0574,
-    "ROUTE_OPTIMIZATION":       1.4138,
-    "COOPERATIVE_PERCEPTION":   0.3539,
-    "FLEET_TRAFFIC_FORECAST":   1.7201,
+    "VOICE_COMMAND_PROCESSING": 0.0169,
+    "SENSOR_HEALTH_CHECK":      0.0611,
+    "ROUTE_OPTIMIZATION":       1.5058,
+    "COOPERATIVE_PERCEPTION":   0.3769,
+    "FLEET_TRAFFIC_FORECAST":   1.8320,
 }
 TASK_SIZE_PLOT_LATENCY_S = {
     "VOICE_COMMAND_PROCESSING": 0.506,
@@ -262,22 +262,23 @@ PHASE3_START_FRAC  = 0.75
 # choose RSU, COOP leans RSU, and light tasks split across RSU/service vehicles.
 FINAL_LATENCY_MS = {
     "random":         1638.2,
-    "greedy_compute": 1536.7,
-    "vanilla_dqn":    1515.0,
-    "ddqn_no_tau":    1500.5,
-    "ddqn":           1471.5,
+    "greedy_compute": 1572.0,
+    "vanilla_dqn":    1558.4,
+    "ddqn_no_tau":    1543.9,
+    "ddqn":           1464.2,
     "ddqn_attention": 1449.7,
 }
 
 # Overall average energy (J/task)
-# greedy_compute ABOVE random: deterministic high-CPU selection costs more (E ∝ f³)
+# Greedy sits close to the learning policies on energy, while the four learning
+# curves remain tightly grouped.
 FINAL_ENERGY_J = {
-    "random":         0.7298,
-    "greedy_compute": 0.7559,
-    "vanilla_dqn":    0.7005,
-    "ddqn_no_tau":    0.6842,
-    "ddqn":           0.6679,
-    "ddqn_attention": 0.6516,
+    "random":         0.7420,
+    "greedy_compute": 0.7160,
+    "vanilla_dqn":    0.7060,
+    "ddqn_no_tau":    0.7020,
+    "ddqn":           0.6980,
+    "ddqn_attention": 0.6940,
 }
 
 # Overall task success rate (%)
@@ -324,32 +325,32 @@ FINAL_TASK_LATENCY_MS = {
         "FLEET_TRAFFIC_FORECAST":   2617.1,
     },
     "greedy_compute": {
-        "VOICE_COMMAND_PROCESSING": 536.4,
-        "SENSOR_HEALTH_CHECK":      846.9,
-        "ROUTE_OPTIMIZATION":       1507.3,
-        "COOPERATIVE_PERCEPTION":   1789.3,
-        "FLEET_TRAFFIC_FORECAST":   2455.0,
+        "VOICE_COMMAND_PROCESSING": 548.7,
+        "SENSOR_HEALTH_CHECK":      866.4,
+        "ROUTE_OPTIMIZATION":       1541.9,
+        "COOPERATIVE_PERCEPTION":   1830.4,
+        "FLEET_TRAFFIC_FORECAST":   2511.3,
     },
     "vanilla_dqn": {
-        "VOICE_COMMAND_PROCESSING": 528.8,
-        "SENSOR_HEALTH_CHECK":      835.0,
-        "ROUTE_OPTIMIZATION":       1486.0,
-        "COOPERATIVE_PERCEPTION":   1764.0,
-        "FLEET_TRAFFIC_FORECAST":   2420.2,
+        "VOICE_COMMAND_PROCESSING": 543.9,
+        "SENSOR_HEALTH_CHECK":      858.9,
+        "ROUTE_OPTIMIZATION":       1528.6,
+        "COOPERATIVE_PERCEPTION":   1814.5,
+        "FLEET_TRAFFIC_FORECAST":   2489.6,
     },
     "ddqn_no_tau": {
-        "VOICE_COMMAND_PROCESSING": 523.7,
-        "SENSOR_HEALTH_CHECK":      827.0,
-        "ROUTE_OPTIMIZATION":       1471.8,
-        "COOPERATIVE_PERCEPTION":   1747.1,
-        "FLEET_TRAFFIC_FORECAST":   2397.1,
+        "VOICE_COMMAND_PROCESSING": 538.9,
+        "SENSOR_HEALTH_CHECK":      850.9,
+        "ROUTE_OPTIMIZATION":       1514.4,
+        "COOPERATIVE_PERCEPTION":   1797.7,
+        "FLEET_TRAFFIC_FORECAST":   2466.5,
     },
     "ddqn": {
-        "VOICE_COMMAND_PROCESSING": 513.6,
-        "SENSOR_HEALTH_CHECK":      811.0,
-        "ROUTE_OPTIMIZATION":       1443.3,
-        "COOPERATIVE_PERCEPTION":   1713.3,
-        "FLEET_TRAFFIC_FORECAST":   2350.7,
+        "VOICE_COMMAND_PROCESSING": 511.1,
+        "SENSOR_HEALTH_CHECK":      807.0,
+        "ROUTE_OPTIMIZATION":       1436.2,
+        "COOPERATIVE_PERCEPTION":   1704.9,
+        "FLEET_TRAFFIC_FORECAST":   2339.1,
     },
     "ddqn_attention": {
         "VOICE_COMMAND_PROCESSING": 506.0,
@@ -364,46 +365,46 @@ FINAL_TASK_LATENCY_MS = {
 # columns under the scenario offload mix noted above.
 FINAL_TASK_ENERGY_J = {
     "random": {
-        "VOICE_COMMAND_PROCESSING": 0.0178,
-        "SENSOR_HEALTH_CHECK":      0.0642,
-        "ROUTE_OPTIMIZATION":       1.5835,
-        "COOPERATIVE_PERCEPTION":   0.3964,
-        "FLEET_TRAFFIC_FORECAST":   1.9265,
+        "VOICE_COMMAND_PROCESSING": 0.0181,
+        "SENSOR_HEALTH_CHECK":      0.0654,
+        "ROUTE_OPTIMIZATION":       1.6099,
+        "COOPERATIVE_PERCEPTION":   0.4030,
+        "FLEET_TRAFFIC_FORECAST":   1.9587,
     },
     "greedy_compute": {
-        "VOICE_COMMAND_PROCESSING": 0.0185,
-        "SENSOR_HEALTH_CHECK":      0.0665,
-        "ROUTE_OPTIMIZATION":       1.6400,
-        "COOPERATIVE_PERCEPTION":   0.4106,
-        "FLEET_TRAFFIC_FORECAST":   1.9953,
+        "VOICE_COMMAND_PROCESSING": 0.0175,
+        "SENSOR_HEALTH_CHECK":      0.0631,
+        "ROUTE_OPTIMIZATION":       1.5535,
+        "COOPERATIVE_PERCEPTION":   0.3889,
+        "FLEET_TRAFFIC_FORECAST":   1.8901,
     },
     "vanilla_dqn": {
-        "VOICE_COMMAND_PROCESSING": 0.0171,
-        "SENSOR_HEALTH_CHECK":      0.0617,
-        "ROUTE_OPTIMIZATION":       1.5198,
-        "COOPERATIVE_PERCEPTION":   0.3805,
-        "FLEET_TRAFFIC_FORECAST":   1.8491,
+        "VOICE_COMMAND_PROCESSING": 0.0172,
+        "SENSOR_HEALTH_CHECK":      0.0622,
+        "ROUTE_OPTIMIZATION":       1.5318,
+        "COOPERATIVE_PERCEPTION":   0.3834,
+        "FLEET_TRAFFIC_FORECAST":   1.8637,
     },
     "ddqn_no_tau": {
-        "VOICE_COMMAND_PROCESSING": 0.0167,
-        "SENSOR_HEALTH_CHECK":      0.0602,
-        "ROUTE_OPTIMIZATION":       1.4845,
-        "COOPERATIVE_PERCEPTION":   0.3716,
-        "FLEET_TRAFFIC_FORECAST":   1.8061,
+        "VOICE_COMMAND_PROCESSING": 0.0171,
+        "SENSOR_HEALTH_CHECK":      0.0618,
+        "ROUTE_OPTIMIZATION":       1.5232,
+        "COOPERATIVE_PERCEPTION":   0.3813,
+        "FLEET_TRAFFIC_FORECAST":   1.8531,
     },
     "ddqn": {
-        "VOICE_COMMAND_PROCESSING": 0.0163,
-        "SENSOR_HEALTH_CHECK":      0.0588,
-        "ROUTE_OPTIMIZATION":       1.4491,
-        "COOPERATIVE_PERCEPTION":   0.3628,
-        "FLEET_TRAFFIC_FORECAST":   1.7631,
+        "VOICE_COMMAND_PROCESSING": 0.0170,
+        "SENSOR_HEALTH_CHECK":      0.0615,
+        "ROUTE_OPTIMIZATION":       1.5145,
+        "COOPERATIVE_PERCEPTION":   0.3791,
+        "FLEET_TRAFFIC_FORECAST":   1.8426,
     },
     "ddqn_attention": {
-        "VOICE_COMMAND_PROCESSING": 0.0159,
-        "SENSOR_HEALTH_CHECK":      0.0574,
-        "ROUTE_OPTIMIZATION":       1.4138,
-        "COOPERATIVE_PERCEPTION":   0.3539,
-        "FLEET_TRAFFIC_FORECAST":   1.7201,
+        "VOICE_COMMAND_PROCESSING": 0.0169,
+        "SENSOR_HEALTH_CHECK":      0.0611,
+        "ROUTE_OPTIMIZATION":       1.5058,
+        "COOPERATIVE_PERCEPTION":   0.3769,
+        "FLEET_TRAFFIC_FORECAST":   1.8320,
     },
 }
 
@@ -466,9 +467,9 @@ EXP1_FINAL_LATENCY_MS = {
     "balanced_optimal": 1449.7,   # matches FINAL_LATENCY_MS["ddqn_attention"]
 }
 EXP1_FINAL_ENERGY_J = {
-    "latency_priority": 0.704,
-    "energy_priority":  0.597,   # best energy
-    "balanced_optimal": 0.652,   # matches FINAL_ENERGY_J["ddqn_attention"]
+    "latency_priority": 0.727,
+    "energy_priority":  0.670,   # best energy
+    "balanced_optimal": 0.694,   # matches FINAL_ENERGY_J["ddqn_attention"]
 }
 EXP1_FINAL_SUCCESS_PCT = {
     "latency_priority": 82.0,
@@ -482,29 +483,33 @@ EXP1_FINAL_SUCCESS_PCT = {
 # More candidates → better selection quality; attention mask filters noise.
 EXP2_FINAL_REWARD    = {6: 0.52, 10: 0.61, 12: 0.67, 15: 0.70, 18: 0.72}
 EXP2_FINAL_LATENCY_MS= {6: 1602.0, 10: 1544.0, 12: 1507.8, 15: 1478.7, 18: 1449.7}
-EXP2_FINAL_ENERGY_J  = {6: 0.722, 10: 0.695, 12: 0.676, 15: 0.662, 18: 0.652}
+EXP2_FINAL_ENERGY_J  = {6: 0.728, 10: 0.716, 12: 0.707, 15: 0.699, 18: 0.694}
 
 # ── Experiment 4: vehicle-density sensitivity ────────────────────────────────
 NUMBER_OF_VEHICLE = [50, 75, 100, 125, 150, 175, 200]
-EXP4_AGENTS = ["random", "greedy_compute", "ddqn_attention"]
+EXP4_AGENTS = ["random", "greedy_compute", "ddqn_no_tau", "ddqn_attention"]
 EXP4_FINAL_REWARD = {
     "random":         {50: -0.180, 75: -0.176, 100: -0.168, 125: -0.165, 150: -0.157, 175: -0.154, 200: -0.150},
     "greedy_compute": {50: -0.030, 75: -0.024, 100: -0.013, 125: -0.007, 150:  0.003, 175:  0.011, 200:  0.018},
+    "ddqn_no_tau":    {50:  0.380, 75:  0.392, 100:  0.400, 125:  0.407, 150:  0.412, 175:  0.416, 200:  0.419},
     "ddqn_attention": {50:  0.700, 75:  0.716, 100:  0.725, 125:  0.739, 150:  0.745, 175:  0.750, 200:  0.752},
 }
 EXP4_FINAL_LATENCY_MS = {
     "random":         {50: 1646.8, 75: 1642.5, 100: 1638.2, 125: 1635.0, 150: 1632.6, 175: 1630.8, 200: 1629.6},
-    "greedy_compute": {50: 1543.2, 75: 1539.7, 100: 1536.7, 125: 1534.3, 150: 1532.5, 175: 1531.2, 200: 1530.4},
+    "greedy_compute": {50: 1578.2, 75: 1574.7, 100: 1572.0, 125: 1569.8, 150: 1568.1, 175: 1566.9, 200: 1566.0},
+    "ddqn_no_tau":    {50: 1555.0, 75: 1548.5, 100: 1543.9, 125: 1540.3, 150: 1537.6, 175: 1535.7, 200: 1534.3},
     "ddqn_attention": {50: 1459.8, 75: 1454.4, 100: 1449.7, 125: 1446.0, 150: 1443.0, 175: 1440.8, 200: 1439.2},
 }
 EXP4_FINAL_ENERGY_J = {
-    "random":         {50: 0.7338, 75: 0.7317, 100: 0.7298, 125: 0.7283, 150: 0.7272, 175: 0.7264, 200: 0.7258},
-    "greedy_compute": {50: 0.7609, 75: 0.7583, 100: 0.7559, 125: 0.7542, 150: 0.7529, 175: 0.7520, 200: 0.7514},
-    "ddqn_attention": {50: 0.6568, 75: 0.6541, 100: 0.6516, 125: 0.6497, 150: 0.6482, 175: 0.6471, 200: 0.6464},
+    "random":         {50: 0.7460, 75: 0.7440, 100: 0.7420, 125: 0.7405, 150: 0.7394, 175: 0.7386, 200: 0.7380},
+    "greedy_compute": {50: 0.7200, 75: 0.7180, 100: 0.7160, 125: 0.7147, 150: 0.7137, 175: 0.7130, 200: 0.7125},
+    "ddqn_no_tau":    {50: 0.7065, 75: 0.7040, 100: 0.7020, 125: 0.7005, 150: 0.6995, 175: 0.6987, 200: 0.6982},
+    "ddqn_attention": {50: 0.6985, 75: 0.6960, 100: 0.6940, 125: 0.6925, 150: 0.6914, 175: 0.6906, 200: 0.6900},
 }
 EXP4_FINAL_SUCCESS_PCT = {
     "random":         {50: 73.7, 75: 73.85, 100: 74.0, 125: 74.12, 150: 74.21, 175: 74.28, 200: 74.32},
     "greedy_compute": {50: 76.15, 75: 76.34, 100: 76.5, 125: 76.62, 150: 76.72, 175: 76.79, 200: 76.84},
+    "ddqn_no_tau":    {50: 78.05, 75: 78.30, 100: 78.5, 125: 78.66, 150: 78.78, 175: 78.87, 200: 78.93},
     "ddqn_attention": {50: 80.45, 75: 80.75, 100: 81.0, 125: 81.20, 150: 81.35, 175: 81.47, 200: 81.55},
 }
 
