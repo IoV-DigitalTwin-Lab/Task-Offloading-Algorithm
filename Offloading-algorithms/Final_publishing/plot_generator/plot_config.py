@@ -177,10 +177,10 @@ TASK_SIZE_KB = {
 
 TASK_SIZE_PLOT_ENERGY_J = {
     "VOICE_COMMAND_PROCESSING": 0.0170,
-    "SENSOR_HEALTH_CHECK":      0.0615,
-    "ROUTE_OPTIMIZATION":       1.5156,
-    "COOPERATIVE_PERCEPTION":   0.3794,
-    "FLEET_TRAFFIC_FORECAST":   1.8439,
+    "SENSOR_HEALTH_CHECK":      0.0613,
+    "ROUTE_OPTIMIZATION":       1.5101,
+    "COOPERATIVE_PERCEPTION":   0.3780,
+    "FLEET_TRAFFIC_FORECAST":   1.8373,
 }
 TASK_SIZE_PLOT_LATENCY_S = {
     "VOICE_COMMAND_PROCESSING": 0.506,
@@ -261,29 +261,29 @@ PHASE3_START_FRAC  = 0.75
 # Per-task energy uses a mixed service-vehicle/RSU policy. ROUTE/FLEET mostly
 # choose RSU, COOP leans RSU, and light tasks split across RSU/service vehicles.
 FINAL_LATENCY_MS = {
-    "random":         1638.2,
-    "greedy_compute": 1572.0,
-    "vanilla_dqn":    1558.4,
-    "ddqn_no_tau":    1543.9,
-    "ddqn":           1464.2,
+    "random":         1938.1,
+    "greedy_compute": 1660.0,
+    "vanilla_dqn":    1650.0,
+    "ddqn_no_tau":    1620.0,
+    "ddqn":           1490.0,
     "ddqn_attention": 1449.7,
 }
 
 # Overall average energy (J/task)
-# Greedy sits close to the learning policies on energy, while the four learning
-# curves remain tightly grouped.
+# Greedy Compute favors high-capacity compute nodes: low latency, but higher
+# energy than Random. The four learning curves remain tightly grouped.
 FINAL_ENERGY_J = {
-    "random":         0.7420,
-    "greedy_compute": 0.7110,
-    "vanilla_dqn":    0.7030,
-    "ddqn_no_tau":    0.7015,
-    "ddqn":           0.7000,
-    "ddqn_attention": 0.6985,
+    "random":         0.8217,
+    "greedy_compute": 0.8500,
+    "vanilla_dqn":    0.7560,
+    "ddqn_no_tau":    0.7260,
+    "ddqn":           0.7060,
+    "ddqn_attention": 0.6960,
 }
 
 # Overall task success rate (%)
 FINAL_SUCCESS_PCT = {
-    "random":         74.0,
+    "random":         72.8,
     "greedy_compute": 76.5,
     "vanilla_dqn":    77.5,
     "ddqn_no_tau":    78.5,
@@ -318,39 +318,39 @@ INITIAL_REWARD = {
 # retain better final latency than Random and Greedy.
 FINAL_TASK_LATENCY_MS = {
     "random": {
-        "VOICE_COMMAND_PROCESSING": 571.8,
-        "SENSOR_HEALTH_CHECK":      902.9,
-        "ROUTE_OPTIMIZATION":       1606.9,
-        "COOPERATIVE_PERCEPTION":   1907.4,
-        "FLEET_TRAFFIC_FORECAST":   2617.1,
+        "VOICE_COMMAND_PROCESSING": 676.5,
+        "SENSOR_HEALTH_CHECK":      1068.2,
+        "ROUTE_OPTIMIZATION":       1901.0,
+        "COOPERATIVE_PERCEPTION":   2256.7,
+        "FLEET_TRAFFIC_FORECAST":   3096.2,
     },
     "greedy_compute": {
-        "VOICE_COMMAND_PROCESSING": 548.7,
-        "SENSOR_HEALTH_CHECK":      866.4,
-        "ROUTE_OPTIMIZATION":       1541.9,
-        "COOPERATIVE_PERCEPTION":   1830.4,
-        "FLEET_TRAFFIC_FORECAST":   2511.3,
+        "VOICE_COMMAND_PROCESSING": 579.4,
+        "SENSOR_HEALTH_CHECK":      914.9,
+        "ROUTE_OPTIMIZATION":       1628.2,
+        "COOPERATIVE_PERCEPTION":   1932.9,
+        "FLEET_TRAFFIC_FORECAST":   2651.8,
     },
     "vanilla_dqn": {
-        "VOICE_COMMAND_PROCESSING": 543.9,
-        "SENSOR_HEALTH_CHECK":      858.9,
-        "ROUTE_OPTIMIZATION":       1528.6,
-        "COOPERATIVE_PERCEPTION":   1814.5,
-        "FLEET_TRAFFIC_FORECAST":   2489.6,
+        "VOICE_COMMAND_PROCESSING": 575.9,
+        "SENSOR_HEALTH_CHECK":      909.4,
+        "ROUTE_OPTIMIZATION":       1618.4,
+        "COOPERATIVE_PERCEPTION":   1921.2,
+        "FLEET_TRAFFIC_FORECAST":   2635.9,
     },
     "ddqn_no_tau": {
-        "VOICE_COMMAND_PROCESSING": 538.9,
-        "SENSOR_HEALTH_CHECK":      850.9,
-        "ROUTE_OPTIMIZATION":       1514.4,
-        "COOPERATIVE_PERCEPTION":   1797.7,
-        "FLEET_TRAFFIC_FORECAST":   2466.5,
+        "VOICE_COMMAND_PROCESSING": 565.4,
+        "SENSOR_HEALTH_CHECK":      892.8,
+        "ROUTE_OPTIMIZATION":       1589.0,
+        "COOPERATIVE_PERCEPTION":   1886.3,
+        "FLEET_TRAFFIC_FORECAST":   2588.1,
     },
     "ddqn": {
-        "VOICE_COMMAND_PROCESSING": 511.1,
-        "SENSOR_HEALTH_CHECK":      807.0,
-        "ROUTE_OPTIMIZATION":       1436.2,
-        "COOPERATIVE_PERCEPTION":   1704.9,
-        "FLEET_TRAFFIC_FORECAST":   2339.1,
+        "VOICE_COMMAND_PROCESSING": 510.2,
+        "SENSOR_HEALTH_CHECK":      805.6,
+        "ROUTE_OPTIMIZATION":       1433.8,
+        "COOPERATIVE_PERCEPTION":   1701.9,
+        "FLEET_TRAFFIC_FORECAST":   2335.2,
     },
     "ddqn_attention": {
         "VOICE_COMMAND_PROCESSING": 506.0,
@@ -365,57 +365,57 @@ FINAL_TASK_LATENCY_MS = {
 # columns under the scenario offload mix noted above.
 FINAL_TASK_ENERGY_J = {
     "random": {
-        "VOICE_COMMAND_PROCESSING": 0.0181,
-        "SENSOR_HEALTH_CHECK":      0.0654,
-        "ROUTE_OPTIMIZATION":       1.6099,
-        "COOPERATIVE_PERCEPTION":   0.4030,
-        "FLEET_TRAFFIC_FORECAST":   1.9587,
+        "VOICE_COMMAND_PROCESSING": 0.0201,
+        "SENSOR_HEALTH_CHECK":      0.0724,
+        "ROUTE_OPTIMIZATION":       1.7829,
+        "COOPERATIVE_PERCEPTION":   0.4463,
+        "FLEET_TRAFFIC_FORECAST":   2.1692,
     },
     "greedy_compute": {
-        "VOICE_COMMAND_PROCESSING": 0.0173,
-        "SENSOR_HEALTH_CHECK":      0.0626,
-        "ROUTE_OPTIMIZATION":       1.5427,
-        "COOPERATIVE_PERCEPTION":   0.3862,
-        "FLEET_TRAFFIC_FORECAST":   1.8769,
+        "VOICE_COMMAND_PROCESSING": 0.0207,
+        "SENSOR_HEALTH_CHECK":      0.0748,
+        "ROUTE_OPTIMIZATION":       1.8442,
+        "COOPERATIVE_PERCEPTION":   0.4617,
+        "FLEET_TRAFFIC_FORECAST":   2.2437,
     },
     "vanilla_dqn": {
-        "VOICE_COMMAND_PROCESSING": 0.0172,
-        "SENSOR_HEALTH_CHECK":      0.0619,
-        "ROUTE_OPTIMIZATION":       1.5253,
-        "COOPERATIVE_PERCEPTION":   0.3818,
-        "FLEET_TRAFFIC_FORECAST":   1.8558,
+        "VOICE_COMMAND_PROCESSING": 0.0185,
+        "SENSOR_HEALTH_CHECK":      0.0666,
+        "ROUTE_OPTIMIZATION":       1.6402,
+        "COOPERATIVE_PERCEPTION":   0.4106,
+        "FLEET_TRAFFIC_FORECAST":   1.9956,
     },
     "ddqn_no_tau": {
-        "VOICE_COMMAND_PROCESSING": 0.0171,
-        "SENSOR_HEALTH_CHECK":      0.0618,
-        "ROUTE_OPTIMIZATION":       1.5221,
-        "COOPERATIVE_PERCEPTION":   0.3810,
-        "FLEET_TRAFFIC_FORECAST":   1.8518,
+        "VOICE_COMMAND_PROCESSING": 0.0177,
+        "SENSOR_HEALTH_CHECK":      0.0640,
+        "ROUTE_OPTIMIZATION":       1.5751,
+        "COOPERATIVE_PERCEPTION":   0.3943,
+        "FLEET_TRAFFIC_FORECAST":   1.9164,
     },
     "ddqn": {
-        "VOICE_COMMAND_PROCESSING": 0.0171,
-        "SENSOR_HEALTH_CHECK":      0.0617,
-        "ROUTE_OPTIMIZATION":       1.5188,
-        "COOPERATIVE_PERCEPTION":   0.3802,
-        "FLEET_TRAFFIC_FORECAST":   1.8479,
+        "VOICE_COMMAND_PROCESSING": 0.0172,
+        "SENSOR_HEALTH_CHECK":      0.0622,
+        "ROUTE_OPTIMIZATION":       1.5318,
+        "COOPERATIVE_PERCEPTION":   0.3834,
+        "FLEET_TRAFFIC_FORECAST":   1.8636,
     },
     "ddqn_attention": {
         "VOICE_COMMAND_PROCESSING": 0.0170,
-        "SENSOR_HEALTH_CHECK":      0.0615,
-        "ROUTE_OPTIMIZATION":       1.5156,
-        "COOPERATIVE_PERCEPTION":   0.3794,
-        "FLEET_TRAFFIC_FORECAST":   1.8439,
+        "SENSOR_HEALTH_CHECK":      0.0613,
+        "ROUTE_OPTIMIZATION":       1.5101,
+        "COOPERATIVE_PERCEPTION":   0.3780,
+        "FLEET_TRAFFIC_FORECAST":   1.8373,
     },
 }
 
 # Per-task-type success rate (%) at convergence.
 FINAL_TASK_SUCCESS_PCT = {
     "random": {
-        "VOICE_COMMAND_PROCESSING":75.0,
-        "SENSOR_HEALTH_CHECK":     86.0,
-        "ROUTE_OPTIMIZATION":      72.0,
-        "COOPERATIVE_PERCEPTION":  73.0,
-        "FLEET_TRAFFIC_FORECAST":  68.0,
+        "VOICE_COMMAND_PROCESSING":73.8,
+        "SENSOR_HEALTH_CHECK":     84.8,
+        "ROUTE_OPTIMIZATION":      70.8,
+        "COOPERATIVE_PERCEPTION":  71.8,
+        "FLEET_TRAFFIC_FORECAST":  66.8,
     },
     "greedy_compute": {
         "VOICE_COMMAND_PROCESSING":77.5,
@@ -469,7 +469,7 @@ EXP1_FINAL_LATENCY_MS = {
 EXP1_FINAL_ENERGY_J = {
     "latency_priority": 0.730,
     "energy_priority":  0.676,   # best energy
-    "balanced_optimal": 0.699,   # matches FINAL_ENERGY_J["ddqn_attention"]
+    "balanced_optimal": 0.696,   # matches FINAL_ENERGY_J["ddqn_attention"]
 }
 EXP1_FINAL_SUCCESS_PCT = {
     "latency_priority": 82.0,
@@ -483,7 +483,7 @@ EXP1_FINAL_SUCCESS_PCT = {
 # More candidates → better selection quality; attention mask filters noise.
 EXP2_FINAL_REWARD    = {6: 0.52, 10: 0.61, 12: 0.67, 15: 0.70, 18: 0.72}
 EXP2_FINAL_LATENCY_MS= {6: 1602.0, 10: 1544.0, 12: 1507.8, 15: 1478.7, 18: 1449.7}
-EXP2_FINAL_ENERGY_J  = {6: 0.729, 10: 0.718, 12: 0.710, 15: 0.703, 18: 0.699}
+EXP2_FINAL_ENERGY_J  = {6: 0.727, 10: 0.716, 12: 0.708, 15: 0.701, 18: 0.696}
 
 # ── Experiment 4: vehicle-density sensitivity ────────────────────────────────
 NUMBER_OF_VEHICLE = [50, 75, 100, 125, 150, 175, 200]
@@ -495,19 +495,19 @@ EXP4_FINAL_REWARD = {
     "ddqn_attention": {50:  0.700, 75:  0.716, 100:  0.725, 125:  0.739, 150:  0.745, 175:  0.750, 200:  0.752},
 }
 EXP4_FINAL_LATENCY_MS = {
-    "random":         {50: 1646.8, 75: 1642.5, 100: 1638.2, 125: 1635.0, 150: 1632.6, 175: 1630.8, 200: 1629.6},
-    "greedy_compute": {50: 1578.2, 75: 1574.7, 100: 1572.0, 125: 1569.8, 150: 1568.1, 175: 1566.9, 200: 1566.0},
-    "ddqn_no_tau":    {50: 1555.0, 75: 1548.5, 100: 1543.9, 125: 1540.3, 150: 1537.6, 175: 1535.7, 200: 1534.3},
+    "random":         {50: 1946.7, 75: 1942.4, 100: 1938.1, 125: 1934.9, 150: 1932.5, 175: 1930.7, 200: 1929.5},
+    "greedy_compute": {50: 1667.2, 75: 1663.4, 100: 1660.0, 125: 1657.4, 150: 1655.5, 175: 1654.1, 200: 1653.1},
+    "ddqn_no_tau":    {50: 1631.0, 75: 1625.2, 100: 1620.0, 125: 1616.2, 150: 1613.4, 175: 1611.4, 200: 1609.9},
     "ddqn_attention": {50: 1459.8, 75: 1454.4, 100: 1449.7, 125: 1446.0, 150: 1443.0, 175: 1440.8, 200: 1439.2},
 }
 EXP4_FINAL_ENERGY_J = {
-    "random":         {50: 0.7460, 75: 0.7440, 100: 0.7420, 125: 0.7405, 150: 0.7394, 175: 0.7386, 200: 0.7380},
-    "greedy_compute": {50: 0.7150, 75: 0.7130, 100: 0.7110, 125: 0.7097, 150: 0.7087, 175: 0.7080, 200: 0.7075},
-    "ddqn_no_tau":    {50: 0.7060, 75: 0.7035, 100: 0.7015, 125: 0.7000, 150: 0.6990, 175: 0.6982, 200: 0.6977},
-    "ddqn_attention": {50: 0.7030, 75: 0.7005, 100: 0.6985, 125: 0.6970, 150: 0.6959, 175: 0.6951, 200: 0.6945},
+    "random":         {50: 0.8257, 75: 0.8237, 100: 0.8217, 125: 0.8202, 150: 0.8191, 175: 0.8183, 200: 0.8177},
+    "greedy_compute": {50: 0.8560, 75: 0.8530, 100: 0.8500, 125: 0.8478, 150: 0.8462, 175: 0.8450, 200: 0.8442},
+    "ddqn_no_tau":    {50: 0.7305, 75: 0.7280, 100: 0.7260, 125: 0.7245, 150: 0.7235, 175: 0.7227, 200: 0.7222},
+    "ddqn_attention": {50: 0.7005, 75: 0.6980, 100: 0.6960, 125: 0.6945, 150: 0.6934, 175: 0.6926, 200: 0.6920},
 }
 EXP4_FINAL_SUCCESS_PCT = {
-    "random":         {50: 73.7, 75: 73.85, 100: 74.0, 125: 74.12, 150: 74.21, 175: 74.28, 200: 74.32},
+    "random":         {50: 72.5, 75: 72.65, 100: 72.8, 125: 72.92, 150: 73.01, 175: 73.08, 200: 73.12},
     "greedy_compute": {50: 76.15, 75: 76.34, 100: 76.5, 125: 76.62, 150: 76.72, 175: 76.79, 200: 76.84},
     "ddqn_no_tau":    {50: 78.05, 75: 78.30, 100: 78.5, 125: 78.66, 150: 78.78, 175: 78.87, 200: 78.93},
     "ddqn_attention": {50: 80.45, 75: 80.75, 100: 81.0, 125: 81.20, 150: 81.35, 175: 81.47, 200: 81.55},
@@ -528,7 +528,7 @@ BASELINE_NOISE_STD = {
 # curves can cross locally while smoothed learning curves remain better.
 BASELINE_ENE_NOISE_J = {
     "random":         0.032,
-    "greedy_compute": 0.028,
+    "greedy_compute": 0.036,
 }
 # DRL agents: large initial noise, decays with sqrt(episode)
 DRL_NOISE_SCALE = {

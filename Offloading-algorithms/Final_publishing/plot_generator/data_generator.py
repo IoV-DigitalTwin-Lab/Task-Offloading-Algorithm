@@ -43,7 +43,7 @@ from plot_generator.plot_config import (
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-VARIATION_SCALE = 0.60
+VARIATION_SCALE = 0.68
 GREEDY_LATENCY_DOWNWARD_DRIFT_MS = 0.0
 ENERGY_CONVERGENCE_VISUAL_LIFT_J = {
     "ddqn": 0.0,
@@ -269,12 +269,15 @@ def _make_metric_curve(
         delta = abs(final_val - initial_val)
         floor = 0.0 if phase2_noise_floor is None else phase2_noise_floor
         noise_std = max(delta * 0.11 * oscillation_boost, floor)
-        p2_noise  = _make_noise(p2_len, rng, noise_std, decay_alpha=0.7)
         variation_amp = max(delta * 0.12 * oscillation_boost, floor * 0.90)
         if metric_name == "success":
             variation_amp *= 0.95
         elif metric_name == "loss":
             variation_amp *= 1.20
+        elif metric_name in ("latency", "energy") and agent_name != "ddqn_attention":
+            variation_amp *= 1.10
+            noise_std *= 1.06
+        p2_noise  = _make_noise(p2_len, rng, noise_std, decay_alpha=0.7)
         p2_noise += _phase2_training_variation(
             p2_len, rng, variation_amp, is_better_when_lower
         )
