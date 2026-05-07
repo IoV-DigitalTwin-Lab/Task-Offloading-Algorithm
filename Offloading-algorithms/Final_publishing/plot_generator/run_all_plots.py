@@ -32,6 +32,7 @@ if _ROOT not in sys.path:
 from plot_generator.plot_config import (
     AGENT_INTERNAL_NAMES, FINAL_LATENCY_MS, FINAL_ENERGY_J,
     FINAL_SUCCESS_PCT, FINAL_REWARD, TOTAL_TASKS, K_VALUES,
+    CONVERGENCE_TASKS,
 )
 from plot_generator.data_generator import generate_exp3_curves
 from plot_generator.tensorboard_writer import write_all
@@ -98,14 +99,15 @@ def _verify_consistency(seed: int, total_tasks: int) -> None:
                     f"Per-task latency ordering [{ttype}]: {a1}={l1:.1f} vs {a2}={l2:.1f}"
                 )
 
-    # Check 3: DRL beats baselines after the reference 10k-task point, scaled
-    # to the requested run length so non-default --tasks values keep the same
-    # relative training timeline as the 20k-task plots.
+    # Check 3: DRL beats baselines after the slowest DRL convergence point,
+    # scaled to the requested run length. This keeps long runs such as
+    # --tasks 200000 on the same visual training timeline as the 20k plots.
     bundle = generate_exp3_curves(seed=seed, total_tasks=total_tasks)
     task_scale = total_tasks / float(TOTAL_TASKS)
-    start = min(total_tasks - 1, max(0, int(round(10_000 * task_scale))))
-    win = min(max(1, int(round(1_000 * task_scale))), total_tasks - start)
     DRL_AGENTS  = ["vanilla_dqn", "ddqn_no_tau", "ddqn", "ddqn_attention"]
+    latest_convergence = max(CONVERGENCE_TASKS[a] for a in DRL_AGENTS)
+    start = min(total_tasks - 1, max(0, int(round(latest_convergence * task_scale))))
+    win = min(max(1, int(round(1_000 * task_scale))), total_tasks - start)
     BASE_AGENTS = ["random", "greedy_compute"]
     for drl in DRL_AGENTS:
         drl_mean = np.mean(bundle.reward_smooth[drl][start: start + win])
